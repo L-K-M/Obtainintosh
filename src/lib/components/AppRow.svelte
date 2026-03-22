@@ -1,7 +1,6 @@
 <script lang="ts">
     import type { App } from '$lib/types';
-    import Button from '$lib/components/widgets/Button.svelte';
-    import BalloonHelp from '$lib/components/widgets/BalloonHelp.svelte';
+    import { BalloonHelp, Button } from '@lkmc/system7-ui';
     import editIcon from '$lib/assets/edit-icon.png';
     import trashIcon from '$lib/assets/trash-icon.png';
     import alertIcon from '$lib/assets/alert-icon.png';

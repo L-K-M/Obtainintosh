@@ -2,6 +2,7 @@
     import type { App } from '$lib/types';
     import AppRow from './AppRow.svelte';
     import semver from 'semver';
+    import { DataTable } from '@lkmc/system7-ui';
 
 
     export let apps: App[] = [];
@@ -10,6 +11,22 @@
     export let oninstall: ((id: string) => void) | undefined = undefined;
     export let onedit: ((app: App) => void) | undefined = undefined;
     export let onremove: ((id: string) => void) | undefined = undefined;
+
+    type SortField = 'name' | 'current' | 'latest' | 'status';
+    type SortDirection = 'asc' | 'desc';
+
+    const columns = [
+        { key: 'name', label: 'Name', width: '35%', sortable: true, className: 'col-name' },
+        { key: 'current', label: 'Current', width: '15%', sortable: true, className: 'col-version' },
+        { key: 'latest', label: 'Latest', width: '15%', sortable: true, className: 'col-version' },
+        { key: 'status', label: 'Status', width: '20%', sortable: true, className: 'col-status' },
+        { key: 'actions', label: 'Actions', width: '15%', className: 'col-actions' }
+    ];
+
+    let sortField: SortField = 'name';
+    let sortDirection: SortDirection = 'asc';
+
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
     function cleanVersion(v: string): string {
         return v.replace(/^v/, '').trim();
@@ -40,122 +57,129 @@
         // Fallback for non-semver versions
         return latest > current;
     }
+
+    $: sortedApps = [...apps].sort((a, b) => {
+        const multiplier = sortDirection === 'asc' ? 1 : -1;
+        const result = compareApps(a, b, sortField) * multiplier;
+        if (result !== 0) {
+            return result;
+        }
+        return collator.compare(a.name, b.name);
+    });
+
+    function compareApps(a: App, b: App, field: SortField): number {
+        if (field === 'name') {
+            return collator.compare(a.name, b.name);
+        }
+
+        if (field === 'current') {
+            return compareVersionStrings(a.current_version || '', b.current_version || '');
+        }
+
+        if (field === 'latest') {
+            return compareVersionStrings(a.latest_version || '', b.latest_version || '');
+        }
+
+        return compareStatus(a, b);
+    }
+
+    function compareStatus(a: App, b: App): number {
+        return statusRank(a) - statusRank(b);
+    }
+
+    function statusRank(app: App): number {
+        if (hasUpdate(app)) {
+            return 0;
+        }
+        if (!app.latest_version) {
+            return 1;
+        }
+        if (app.current_version) {
+            return 2;
+        }
+        return 3;
+    }
+
+    function compareVersionStrings(leftRaw: string, rightRaw: string): number {
+        const left = cleanVersion(leftRaw);
+        const right = cleanVersion(rightRaw);
+
+        if (!left && !right) {
+            return 0;
+        }
+        if (!left) {
+            return -1;
+        }
+        if (!right) {
+            return 1;
+        }
+
+        if (semver.valid(left) && semver.valid(right)) {
+            return semver.compare(left, right);
+        }
+
+        const leftCoerced = semver.coerce(left);
+        const rightCoerced = semver.coerce(right);
+        if (leftCoerced && rightCoerced) {
+            return semver.compare(leftCoerced, rightCoerced);
+        }
+
+        return collator.compare(left, right);
+    }
+
+    function setSort(field: string) {
+        if (field !== 'name' && field !== 'current' && field !== 'latest' && field !== 'status') {
+            return;
+        }
+
+        if (sortField === field) {
+            sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+            return;
+        }
+
+        sortField = field;
+        sortDirection = 'asc';
+    }
 </script>
 
-<div class="data-view">
-    <div class="table-header-container">
-        <table>
-            <thead>
-            <tr>
-                <th class="col-name">Name</th>
-                <th class="col-version">Current</th>
-                <th class="col-version">Latest</th>
-                <th class="col-status">Status</th>
-                <th class="col-actions">Actions</th>
-            </tr>
-            </thead>
-        </table>
-    </div>
-    <div class="table-body-container">
-        <table>
-            <tbody>
-            {#if loading && apps.length === 0}
-                <tr>
-                    <td colspan="5" class="loading-state">Loading...</td>
-                </tr>
-            {:else if apps.length === 0}
-                <tr>
-                    <td colspan="5" class="empty-state">No apps tracked. Click "Add Program..." to start.</td>
-                </tr>
-            {:else}
-                {#each apps as app}
-                    <AppRow
-                        {app}
-                        hasUpdate={hasUpdate(app)}
-                        onopenurl={onopenurl}
-                        oninstall={oninstall}
-                        onedit={onedit}
-                        onremove={onremove}
-                    />
-                {/each}
-            {/if}
-            </tbody>
-        </table>
-    </div>
+<div class="app-table">
+    <DataTable
+        class="data-view"
+        columns={columns}
+        sortKey={sortField}
+        sortDirection={sortDirection}
+        onSort={setSort}
+        loading={loading && apps.length === 0}
+        empty={!loading && apps.length === 0}
+        emptyText="No apps tracked. Click 'Add Program...' to start."
+        emptyColspan={5}
+    >
+        {#each sortedApps as app}
+            <AppRow
+                {app}
+                hasUpdate={hasUpdate(app)}
+                onopenurl={onopenurl}
+                oninstall={oninstall}
+                onedit={onedit}
+                onremove={onremove}
+            />
+        {/each}
+    </DataTable>
 </div>
 
 <style>
-    .data-view {
+    .app-table {
         flex: 1;
+        min-height: 0;
         display: flex;
-        flex-direction: column;
-        overflow: hidden;
+    }
+
+    .app-table :global(.data-view) {
         background: #fff;
-        min-height: 0;
-    }
-
-    .table-header-container {
-        padding-right: 16px;
-        border-bottom: 1px solid #000;
-    }
-
-    .table-body-container {
-        flex: 1;
-        overflow-y: scroll;
-        overflow-x: hidden;
-        min-height: 0;
-        margin-top: 2px;
-        border-top: 1px solid #000;
-    }
-
-    table {
         width: 100%;
-        border-collapse: collapse;
-        table-layout: fixed;
     }
 
-    th {
-        padding: 4px 8px;
-        text-align: left;
-        font-weight: normal;
-        background: #fff;
-    }
-
-    th.col-name {
-        text-decoration: underline;
+    .app-table :global(.data-view th.col-name) {
         padding-left: 49px;
     }
-
-    th:last-child {
-        border-right: none;
-    }
-
-    .col-name {
-        width: 35%;
-    }
-
-    .col-version {
-        width: 15%;
-    }
-
-    .col-status {
-        width: 20%;
-    }
-
-    .col-actions {
-        width: 15%;
-        text-align: right;
-    }
-
-    .loading-state, .empty-state {
-        padding: 20px;
-        text-align: center;
-        color: #666;
-        font-style: italic;
-    }
-
-    :global(tr:last-child td) {
-        border-bottom: none;
-    }
 </style>
-

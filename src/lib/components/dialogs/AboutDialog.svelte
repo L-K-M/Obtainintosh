@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ModalDialog from '$lib/components/widgets/ModalDialog.svelte';
+  import { ModalDialog } from '@lkmc/system7-ui';
   import aboutImg from '$lib/assets/about.png';
   export let onClose: () => void;
 </script>

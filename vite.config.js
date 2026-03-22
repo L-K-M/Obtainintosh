@@ -3,6 +3,8 @@ import { sveltekit } from "@sveltejs/kit/vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+const projectDir = new URL(".", import.meta.url).pathname;
+const system7UiDir = new URL("../system7-ui", import.meta.url).pathname;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -27,6 +29,9 @@ export default defineConfig(async () => ({
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
+    },
+    fs: {
+      allow: [projectDir, system7UiDir],
     },
   },
 }));

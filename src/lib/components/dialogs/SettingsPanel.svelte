@@ -2,9 +2,7 @@
     import {onMount} from 'svelte';
     import {TauriService} from '$lib/tauri';
     import type {Settings} from '$lib/types';
-    import MovableDialog from '$lib/components/widgets/MovableDialog.svelte';
-    import Button from '$lib/components/widgets/Button.svelte';
-    import BalloonHelp from '$lib/components/widgets/BalloonHelp.svelte';
+    import {BalloonHelp, Button, MovableDialog} from '@lkmc/system7-ui';
     import {openUrl} from '@tauri-apps/plugin-opener';
 
     export let onclose: (() => void) | undefined = undefined;

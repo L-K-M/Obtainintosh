@@ -1,5 +1,5 @@
 <script lang="ts">
-    import Button from '$lib/components/widgets/Button.svelte';
+    import { Button } from '@lkmc/system7-ui';
 
 
     export let loading = false;
@@ -43,4 +43,3 @@
         padding: 0 10px;
     }
 </style>
-

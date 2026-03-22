@@ -4,11 +4,8 @@
     import type {App} from '$lib/types';
     import AddAppDialog from '$lib/components/dialogs/AddAppDialog.svelte';
     import SettingsPanel from '$lib/components/dialogs/SettingsPanel.svelte';
-    import TitleBar from '$lib/components/widgets/TitleBar.svelte';
-    import ConfirmDialog from '$lib/components/widgets/ConfirmDialog.svelte';
-    import Notification from '$lib/components/widgets/Notification.svelte';
+    import { ConfirmDialog, ErrorBanner, Notification, TitleBar } from '@lkmc/system7-ui';
     import Toolbar from '$lib/components/Toolbar.svelte';
-    import ErrorBanner from '$lib/components/widgets/ErrorBanner.svelte';
     import AppTable from '$lib/components/AppTable.svelte';
 
     import {getCurrentWindow} from '@tauri-apps/api/window';
@@ -164,9 +161,10 @@
     }
 </script>
 
-<div class="window-frame" class:window-unfocused={!$windowFocused}>
+<div class="window-frame s7-root" class:window-unfocused={!$windowFocused}>
     <TitleBar
             title="Obtainintosh"
+            focused={$windowFocused}
             closable
             collapsible
             shadeable

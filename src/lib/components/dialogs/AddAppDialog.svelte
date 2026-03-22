@@ -1,8 +1,7 @@
 <script lang="ts">
   import { TauriService } from '$lib/tauri';
   import type { App } from '$lib/types';
-  import MovableDialog from '$lib/components/widgets/MovableDialog.svelte';
-  import Button from '$lib/components/widgets/Button.svelte';
+  import { Button, MovableDialog } from '@lkmc/system7-ui';
   
 
   export let app: App | null = null;
