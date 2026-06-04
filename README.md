@@ -4,6 +4,9 @@ Obtainintosh is a Tauri-based Mac OS X program that helps you manage and update 
 
 ![Main window screenshot showing a list of programs in different states](./screenshot.png)
 
+> [!IMPORTANT]
+> LLM Disclosure: This project was developed with the assistance of large language models (AI coding tools).
+
 ## Installation
 
 ```bash
