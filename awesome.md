@@ -113,14 +113,14 @@ The GitHub token lands in `~/Library/Application Support/Obtainintosh/apps.json`
 in plaintext. The macOS Keychain (e.g. via the `keyring` crate) would be the
 proper home. At minimum, the file should be `chmod 600`.
 
-### G3. Over-broad capabilities
+### G3. Over-broad capabilities ✅
 `capabilities/default.json` grants `shell:allow-execute` and
 `shell:allow-spawn` to the webview, but no frontend code uses the shell plugin
 (the `open -R` call happens in Rust). Drop both permissions and the
 `tauri-plugin-shell` dependency. Also `"csp": null` disables the content
 security policy entirely.
 
-### G4. Unused dependencies
+### G4. Unused dependencies ✅
 `zip = "0.6"` (an old version with known CVEs) and `semver` are declared in
 `Cargo.toml` but never used in Rust code. Dead weight on every build.
 
@@ -147,8 +147,9 @@ Harmless in a single-page app, but inconsistent.
 The backend parses `release_notes` from GitHub and the model carries it across
 the IPC boundary… where nothing displays it. See idea I3.
 
-### G10. README install steps don't clone
+### G10. README install steps don't clone ✅
 The README says `cd obtainintosh` without a preceding `git clone` line.
+(Fixed in this PR, since it's a docs change.)
 
 ---
 
@@ -233,7 +234,7 @@ Apple menu → "Puzzle": the 15-puzzle from System 7, because no reason.
 
 ## Implementation status
 
-Backend fixes (B1–B9, M2 events) and frontend fixes (B10–B15, M1, I1) are
-implemented in follow-up PRs, split so they touch disjoint files
+Backend fixes (B1–B9, G3, G4, M2 events) and frontend fixes (B10–B15, M1, I1)
+are implemented in follow-up PRs, split so they touch disjoint files
 (`src-tauri/**` vs `src/**`) and don't conflict with each other or with this
-document.
+document. G10 is fixed in this PR.
