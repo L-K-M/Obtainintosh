@@ -64,17 +64,23 @@ impl Storage {
         Ok(data.apps.iter().find(|app| app.id == id).cloned())
     }
 
-    pub fn add_app(&self, mut app: App) -> Result<()> {
+    pub fn add_app(&self, mut app: App) -> Result<App> {
         // Generate UUID if not provided
         if app.id.is_empty() {
             app.id = uuid::Uuid::new_v4().to_string();
         }
 
         let mut data = self.data.lock().unwrap();
-        data.apps.push(app);
+        if data.apps.iter().any(|a| {
+            a.source_url.trim_end_matches('/').eq_ignore_ascii_case(app.source_url.trim_end_matches('/'))
+        }) {
+            anyhow::bail!("This repository is already being tracked");
+        }
+        data.apps.push(app.clone());
         drop(data);
-        
-        self.save()
+
+        self.save()?;
+        Ok(app)
     }
 
     pub fn update_app(&self, updated_app: App) -> Result<()> {
