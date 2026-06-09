@@ -94,11 +94,10 @@
     async function confirmRemove() {
         if (!confirmAppId) return;
 
-        const success = await appStore.removeApp(confirmAppId, clickedApplicationName);
-        if (success || true) {
-            showConfirm = false;
-            confirmAppId = null;
-        }
+        // Close the dialog either way; failures surface as a notification
+        await appStore.removeApp(confirmAppId, clickedApplicationName);
+        showConfirm = false;
+        confirmAppId = null;
     }
 
     function cancelRemove() {

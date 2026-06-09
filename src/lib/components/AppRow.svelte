@@ -15,6 +15,8 @@
     export let onedit: ((app: App) => void) | undefined = undefined;
     export let onremove: ((id: string) => void) | undefined = undefined;
 
+    $: iconUrl = getIconUrl(app);
+
     function getIconUrl(app: App): string | null {
         if (app.source_type === 'github') {
             try {
@@ -37,9 +39,9 @@
     <td class="col-name clickable" on:dblclick={() => { if(onopenurl) onopenurl(app.source_url); }}>
         <BalloonHelp message="Double-click to open the GitHub page">
             <div class="name-cell">
-                {#if getIconUrl(app)}
+                {#if iconUrl}
                     <img
-                        src={getIconUrl(app)}
+                        src={iconUrl}
                         alt=""
                         class="app-icon-img"
                         on:error={(e) => {

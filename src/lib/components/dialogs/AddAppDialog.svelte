@@ -6,7 +6,7 @@
 
   export let app: App | null = null;
   export let onclose: (() => void) | undefined = undefined;
-  export let onadd: ((e: {url: string, name: string}) => void) | undefined = undefined;
+  export let onadd: ((e: {url: string, name: string}) => void | Promise<void>) | undefined = undefined;
   export let onupdate: (() => void) | undefined = undefined;
 
   let url = app ? app.source_url : '';
@@ -52,17 +52,19 @@
     try {
       loading = true;
       error = null;
-      
+
       if (isEdit && app) {
         // Update app
         await TauriService.updateApp(app.id, url.trim(), name.trim());
         if (onupdate) onupdate();
       } else {
-        // Add app
-        if (onadd) onadd({ url: url.trim(), name: name.trim() });
+        // Add app — await it, otherwise a failed add leaves the dialog
+        // open with the button stuck in the disabled/loading state
+        if (onadd) await onadd({ url: url.trim(), name: name.trim() });
       }
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to save program';
+    } finally {
       loading = false;
     }
   }
