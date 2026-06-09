@@ -4,6 +4,9 @@ A thorough review of the codebase: bugs, general issues, missing features, and
 some ideas for delightful improvements. Items marked **[implementing]** are
 being addressed in follow-up PRs; the rest are documented for future work.
 
+> Follow-up PRs: backend items are implemented in **#5**, frontend items
+> (B7, B14, G9) in **#6**.
+
 ---
 
 ## Bugs
