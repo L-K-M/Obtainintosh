@@ -23,14 +23,23 @@ pub async fn add_app(
     // Detect source type
     let source_type = crate::sources::detect_source_type(&url)
         .ok_or_else(|| "Unsupported source URL".to_string())?;
-    
+
+    // Prevent tracking the same source twice
+    let existing = state.storage.get_all_apps().map_err(|e| e.to_string())?;
+    if let Some(dup) = existing
+        .iter()
+        .find(|a| a.source_url.trim_end_matches('/') == url.trim_end_matches('/'))
+    {
+        return Err(format!("\"{}\" already tracks this URL", dup.name));
+    }
+
     // Check if app is already installed
     let (current_version, install_path) = if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
         (Some(version), Some(path))
     } else {
         (None, None)
     };
-    
+
     let app = App {
         id: String::new(),
         name,
@@ -41,14 +50,9 @@ pub async fn add_app(
         install_path,
         last_checked: None,
     };
-    
-    state.storage.add_app(app.clone()).map_err(|e| e.to_string())?;
-    
-    // Return the app with generated ID
-    let apps = state.storage.get_all_apps().map_err(|e| e.to_string())?;
-    apps.into_iter()
-        .find(|a| a.source_url == app.source_url)
-        .ok_or_else(|| "Failed to retrieve added app".to_string())
+
+    // Storage assigns the UUID and returns the stored record
+    state.storage.add_app(app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -70,7 +74,12 @@ pub async fn update_app(
 
     // Update fields
     app.name = name;
-    app.source_url = url;
+    if app.source_url != url {
+        // Version info from the old source is meaningless for the new one
+        app.latest_version = None;
+        app.last_checked = None;
+        app.source_url = url;
+    }
 
     // Re-detect source type in case URL changed
     app.source_type = crate::sources::detect_source_type(&app.source_url)
@@ -216,33 +225,45 @@ pub async fn download_and_install(
 
 async fn download_file(url: &str, filename: &str) -> Result<String> {
     log::debug!("download_file called with url={}, filename={}", url, filename);
-    
+
+    // The filename comes from the GitHub API; refuse anything that could
+    // escape the cache directory.
+    if filename.is_empty() || filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
+        anyhow::bail!("Refusing to download asset with unsafe file name: {}", filename);
+    }
+
     // Use system temp directory
     let cache_dir = std::env::temp_dir().join("obtainintosh-downloads");
-    
+
     log::debug!("Cache dir: {:?}", cache_dir);
     std::fs::create_dir_all(&cache_dir)?;
-    
+
     let file_path = cache_dir.join(filename);
     log::debug!("File path: {:?}", file_path);
-    
+
     log::debug!("Fetching URL...");
-    let response = reqwest::get(url).await?;
-    log::debug!("Got response, reading bytes...");
-    let bytes = response.bytes().await?;
-    log::debug!("Downloaded {} bytes", bytes.len());
-    
-    log::debug!("Writing to file...");
-    std::fs::write(&file_path, bytes)?;
-    log::debug!("File written successfully");
-    
-    // Verify file exists
-    if file_path.exists() {
-        log::debug!("Verified file exists at {:?}", file_path);
-    } else {
-        log::warn!("File does not exist after write!");
+    // Connect timeout only: a total request timeout would abort large,
+    // slow downloads that are progressing fine.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Download failed: {}", e))?;
+
+    // Stream to disk instead of buffering the whole asset in memory
+    let mut file = std::fs::File::create(&file_path)?;
+    let mut downloaded: u64 = 0;
+    while let Some(chunk) = response.chunk().await? {
+        std::io::Write::write_all(&mut file, &chunk)?;
+        downloaded += chunk.len() as u64;
     }
-    
+    std::io::Write::flush(&mut file)?;
+    log::debug!("Downloaded {} bytes to {:?}", downloaded, file_path);
+
     Ok(file_path.to_string_lossy().to_string())
 }
 
