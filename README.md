@@ -11,7 +11,8 @@ Obtainintosh is a Tauri-based Mac OS X program that helps you manage and update 
 
 ```bash
 # Clone the repository
-cd obtainintosh
+git clone https://github.com/L-K-M/Obtainintosh.git
+cd Obtainintosh
 
 # Install dependencies
 npm install

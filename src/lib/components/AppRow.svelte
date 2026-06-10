@@ -69,6 +69,10 @@
     <td class="col-status">
         {#if hasUpdate}
             <span class="status-badge update">Update Available</span>
+        {:else if !app.last_checked}
+            <BalloonHelp message="This program hasn't been checked for updates yet.">
+                <span class="status-badge not-checked">Not Checked</span>
+            </BalloonHelp>
         {:else if !app.latest_version}
             <BalloonHelp message="No Mac version for this application was found.">
                 <span class="status-badge missing">
