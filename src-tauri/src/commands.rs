@@ -33,14 +33,14 @@ pub async fn add_app(
     // Detect source type
     let source_type = crate::sources::detect_source_type(&url)
         .ok_or_else(|| "Unsupported source URL".to_string())?;
-    
+
     // Check if app is already installed
     let (current_version, install_path) = if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
         (Some(version), Some(path))
     } else {
         (None, None)
     };
-    
+
     let app = App {
         id: String::new(),
         name,
@@ -51,7 +51,9 @@ pub async fn add_app(
         install_path,
         last_checked: None,
     };
-    
+
+    // Storage assigns the UUID, rejects duplicate source URLs, and returns
+    // the stored record
     state.storage.add_app(app).map_err(|e| e.to_string())
 }
 
@@ -74,7 +76,12 @@ pub async fn update_app(
 
     // Update fields
     app.name = name;
-    app.source_url = url;
+    if app.source_url != url {
+        // Version info from the old source is meaningless for the new one
+        app.latest_version = None;
+        app.last_checked = None;
+        app.source_url = url;
+    }
 
     // Re-detect source type in case URL changed
     app.source_type = crate::sources::detect_source_type(&app.source_url)
@@ -273,7 +280,12 @@ async fn download_file(
     let file_path = cache_dir.join(filename);
     log::debug!("File path: {:?}", file_path);
 
-    let client = reqwest::Client::new();
+    // Connect timeout only: a total request timeout would abort large,
+    // slow downloads that are progressing fine.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to build HTTP client")?;
     let mut response = client
         .get(url)
         .header("User-Agent", crate::sources::USER_AGENT)
