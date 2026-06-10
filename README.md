@@ -2,6 +2,8 @@
 
 Obtainintosh is a Tauri-based Mac OS X program that helps you manage and update apps distributed through GitHub releases, similar to Obtainium for Android. It's also the most Mac-like program ever released on Mac OS X.
 
+**Latest release:** v<!-- version -->0.1.0<!-- /version --> · [Download](https://github.com/L-K-M/Obtainintosh/releases/latest)
+
 ![Main window screenshot showing a list of programs in different states](./screenshot.png)
 
 > [!IMPORTANT]
