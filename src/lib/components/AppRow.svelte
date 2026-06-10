@@ -1,10 +1,7 @@
 <script lang="ts">
     import type { App } from '$lib/types';
-    import { BalloonHelp, Button } from '@lkmc/system7-ui';
-    import editIcon from '$lib/assets/edit-icon.png';
-    import trashIcon from '$lib/assets/trash-icon.png';
+    import { BalloonHelp, Button, DownloadIcon, EditIcon, TrashIcon } from '@lkmc/system7-ui';
     import alertIcon from '$lib/assets/alert-icon.png';
-    import downloadIcon from '$lib/assets/download.png';
 
 
 
@@ -91,19 +88,19 @@
             {#if hasUpdate}
                 <BalloonHelp message="Download and save the update for this program">
                     <Button variant="icon" onclick={() => { if(oninstall) oninstall(app.id); }}>
-                        <img src={downloadIcon} alt="Update"/>
+                        <DownloadIcon alt="Update"/>
                     </Button>
                 </BalloonHelp>
             {:else if !app.current_version}
                 <BalloonHelp message="Download this program">
                     <Button variant="icon" onclick={() => { if(oninstall) oninstall(app.id); }}>
-                        <img src={downloadIcon} alt="Download"/>
+                        <DownloadIcon alt="Download"/>
                     </Button>
                 </BalloonHelp>
             {/if}
             <BalloonHelp message="Edit this program's name and URL">
                 <Button variant="icon" onclick={() => { if(onedit) onedit(app); }}>
-                    <img src={editIcon} alt="Edit"/>
+                    <EditIcon alt="Edit"/>
                 </Button>
             </BalloonHelp>
             <BalloonHelp message="Delete program from list - if it's installed, it will remain on your system">
@@ -111,7 +108,7 @@
                     variant="icon"
                     onclick={() => { if(onremove) onremove(app.id); }}
                 >
-                    <img src={trashIcon} alt="Remove"/>
+                    <TrashIcon alt="Remove"/>
                 </Button>
             </BalloonHelp>
         </div>

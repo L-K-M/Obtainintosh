@@ -36,6 +36,14 @@ pub struct Settings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemColors {
+    pub accent_color: Option<String>,
+    pub accent_text_color: Option<String>,
+    pub highlight_color: Option<String>,
+    pub highlight_text_color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppData {
     pub apps: Vec<App>,
     pub settings: Settings,

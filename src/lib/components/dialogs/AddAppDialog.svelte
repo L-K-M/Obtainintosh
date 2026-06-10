@@ -1,7 +1,7 @@
 <script lang="ts">
   import { TauriService } from '$lib/tauri';
   import type { App } from '$lib/types';
-  import { Button, MovableDialog } from '@lkmc/system7-ui';
+  import { Button, MovableDialog, TextInput } from '@lkmc/system7-ui';
   
 
   export let app: App | null = null;
@@ -42,9 +42,15 @@
     if (onclose) onclose();
   }
 
+  function handleInputKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter' && url && name && !loading) {
+      void handleSubmit(event);
+    }
+  }
+
   async function handleSubmit(event: Event) {
     event.preventDefault();
-    
+
     if (!url.trim()) {
       error = 'Please enter a GitHub or GitLab URL';
       return;
@@ -77,28 +83,29 @@
 </script>
 
 <MovableDialog title={app ? 'Edit Program' : 'Add Program'} onclose={close}>
-  <div class="form-group">
+  <div class="s7-form-group" class:has-error={!!error}>
     <label for="url">GitHub URL</label>
-    <input 
-      type="text" 
-      id="url" 
-      bind:value={url} 
+    <TextInput
+      id="url"
+      bind:value={url}
+      clearable
       placeholder="https://github.com/owner/repo"
-      on:input={handleUrlChange}
-      class:error={!!error}
+      oninput={handleUrlChange}
+      onkeydown={handleInputKeydown}
     />
     {#if error}
-      <span class="error-msg">{error}</span>
+      <span class="s7-error-msg">{error}</span>
     {/if}
   </div>
 
-  <div class="form-group">
+  <div class="s7-form-group">
     <label for="name">Program Name</label>
-    <input 
-      type="text" 
-      id="name" 
-      bind:value={name} 
+    <TextInput
+      id="name"
+      bind:value={name}
+      clearable
       placeholder="Program Name"
+      onkeydown={handleInputKeydown}
     />
   </div>
 
@@ -111,6 +118,15 @@
 </MovableDialog>
 
 <style>
+  .s7-form-group :global(.sys7-text-input) {
+    flex: 1;
+    width: 100%;
+  }
+
+  .s7-form-group.has-error :global(.sys7-text-input) {
+    border-width: 2px;
+  }
+
   .actions {
     display: flex;
     gap: 12px;

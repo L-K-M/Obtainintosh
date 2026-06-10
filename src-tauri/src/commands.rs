@@ -1,4 +1,5 @@
-use crate::models::{App, Settings, SourceType};
+use crate::models::{App, Settings, SourceType, SystemColors};
+use crate::system_colors;
 use crate::sources::GitHubAdapter;
 use crate::storage::Storage;
 use anyhow::{Context, Result};
@@ -162,6 +163,11 @@ pub async fn update_settings(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.storage.update_settings(settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_system_colors() -> Result<SystemColors, String> {
+    Ok(system_colors::get_system_colors())
 }
 
 #[tauri::command]

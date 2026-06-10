@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { ProgressBar } from '@lkmc/system7-ui';
+
     // A System 7 Finder-style file copy progress dialog.
     // Driven by 'download-progress' events emitted from the Rust backend.
     export let fileName: string;
@@ -10,8 +12,6 @@
         if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     }
-
-    $: percent = total ? Math.min(100, (downloaded / total) * 100) : null;
 </script>
 
 <div class="overlay">
@@ -20,13 +20,13 @@
             <span class="copy-label">Downloading:</span>
             <span class="copy-value">{fileName}</span>
         </div>
-        <div class="progress-track">
-            {#if percent !== null}
-                <div class="progress-fill" style="width: {percent}%"></div>
-            {:else}
-                <div class="progress-fill indeterminate"></div>
-            {/if}
-        </div>
+        <ProgressBar
+            value={downloaded}
+            max={total || 1}
+            indeterminate={!total}
+            height={12}
+            ariaLabel="Download progress for {fileName}"
+        />
         <div class="copy-line bytes">
             {#if total}
                 {formatBytes(downloaded)} of {formatBytes(total)}
@@ -76,37 +76,6 @@
         overflow: hidden;
         text-overflow: ellipsis;
         font-weight: bold;
-    }
-
-    .progress-track {
-        border: 1px solid #000;
-        height: 12px;
-        background: #fff;
-        overflow: hidden;
-    }
-
-    .progress-fill {
-        height: 100%;
-        background: #000;
-        transition: width 0.15s linear;
-    }
-
-    /* Barber-pole stripes while the total size is unknown */
-    .progress-fill.indeterminate {
-        width: 100%;
-        background: repeating-linear-gradient(
-            -45deg,
-            #000 0,
-            #000 6px,
-            #fff 6px,
-            #fff 12px
-        );
-        animation: barber 0.6s linear infinite;
-    }
-
-    @keyframes barber {
-        from { background-position: 0 0; }
-        to { background-position: 17px 0; }
     }
 
     .copy-line.bytes {

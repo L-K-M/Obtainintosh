@@ -1,10 +1,16 @@
 <script lang="ts">
-    import {onMount} from 'svelte';
+    import {onMount, tick} from 'svelte';
 
-    import type {App} from '$lib/types';
+    import type {App, SystemColors} from '$lib/types';
     import AddAppDialog from '$lib/components/dialogs/AddAppDialog.svelte';
     import SettingsPanel from '$lib/components/dialogs/SettingsPanel.svelte';
-    import { ConfirmDialog, ErrorBanner, Notification, TitleBar } from '@lkmc/system7-ui';
+    import {
+        ConfirmDialog,
+        ErrorBanner,
+        Notification,
+        TitleBar,
+        getSystem7WindowStyle
+    } from '@lkmc/system7-ui';
     import Toolbar from '$lib/components/Toolbar.svelte';
     import AppTable from '$lib/components/AppTable.svelte';
 
@@ -18,6 +24,7 @@
 
     import { appStore } from '$lib/util/appStore';
     import { notifications } from '$lib/util/notifications';
+    import { TauriService } from '$lib/tauri';
 
     let showAddDialog = false;
     let showSettings = false;
@@ -27,6 +34,7 @@
     let showConfirm = false;
     let confirmAppId: string | null = null;
     let showAboutDialog = false;
+    let systemColors: SystemColors | null = null;
 
     interface DownloadProgress {
         appId: string;
@@ -39,6 +47,7 @@
 
     $: ({ apps, loading, error } = $appStore);
 
+    $: windowStyle = systemColors ? getSystem7WindowStyle(systemColors) : '';
 
     const appWindow = getCurrentWindow();
     const windowManager = new WindowManager();
@@ -46,8 +55,9 @@
     onMount(() => {
         // Load the list, then quietly check for updates in the background
         appStore.loadApps().then(() => appStore.checkForUpdates(true));
+        void loadSystemColors();
 
-        appWindow.onFocusChanged(({payload: focused}) => {
+        const unlistenFocus = appWindow.onFocusChanged(({payload: focused}) => {
             windowFocused.set(focused);
         });
 
@@ -74,6 +84,7 @@
 
         // Cleanup on unmount
         return () => {
+            unlistenFocus.then(fn => fn());
             unlistenAddApp.then(fn => fn());
             unlistenCheckAll.then(fn => fn());
             unlistenSettings.then(fn => fn());
@@ -81,6 +92,14 @@
             unlistenProgress.then(fn => fn());
         };
     });
+
+    async function loadSystemColors() {
+        try {
+            systemColors = await TauriService.getSystemColors();
+        } catch {
+            systemColors = null;
+        }
+    }
 
     async function handleAddApp(url: string, name: string) {
         const success = await appStore.addApp(url, name);
@@ -142,31 +161,36 @@
         windowManager.close();
     }
 
-    async function handleWindowMinimize() {
-        // "Fit to Content" (Zoom)
-        try {
-            const currentSize = await appWindow.innerSize();
-            const scaleFactor = await appWindow.scaleFactor();
-            const currentWidth = currentSize.width / scaleFactor;
+    function getAppTableHeightMetrics(): { viewportHeight: number; contentHeight: number } | null {
+        const tableBodyContainer = document.querySelector<HTMLDivElement>('.s7-data-table-body-container');
+        const tableBody = tableBodyContainer?.querySelector<HTMLTableElement>('table');
 
-            // Measure visible components
-            const titleBarH = document.querySelector('.title-bar')?.getBoundingClientRect().height || 35;
-            const toolbarH = document.querySelector('.toolbar')?.getBoundingClientRect().height || 0;
-            const errorH = document.querySelector('.error-banner')?.getBoundingClientRect().height || 0;
-            
-            // AppTable internals
-            const tableHeaderH = document.querySelector('.table-header-container')?.getBoundingClientRect().height || 0;
-            const tableBodyH = document.querySelector('.table-body-container table')?.getBoundingClientRect().height || 0;
-            
-            // Add some padding/borders safety (window frame border top/bottom + internal spacing)
-            // Table body container has 1px border top. Window frame has 1px border.
-            // Let's add a small buffer or just sum exacts.
-            const totalHeight = titleBarH + toolbarH + errorH + tableHeaderH + tableBodyH + 5; // +5 for borders/padding safety
-
-            await windowManager.setSize(currentWidth, totalHeight);
-        } catch (e) {
-            console.error('Failed to resize window:', e);
+        if (!tableBodyContainer || !tableBody) {
+            return null;
         }
+
+        return {
+            viewportHeight: tableBodyContainer.clientHeight,
+            contentHeight: tableBody.getBoundingClientRect().height
+        };
+    }
+
+    async function handleWindowResizeToFit() {
+        // "Fit to Content" (Zoom): grow or shrink the window by the difference
+        // between the table's content height and its visible viewport.
+        if (isWindowShaded) {
+            return;
+        }
+
+        await tick();
+
+        const tableHeightMetrics = getAppTableHeightMetrics();
+        if (!tableHeightMetrics) {
+            return;
+        }
+
+        const heightDelta = Math.round(tableHeightMetrics.contentHeight - tableHeightMetrics.viewportHeight);
+        await windowManager.resizeHeightBy(heightDelta);
     }
 
     async function handleWindowShade() {
@@ -178,7 +202,7 @@
     }
 </script>
 
-<div class="window-frame s7-root" class:window-unfocused={!$windowFocused}>
+<div class="window-frame s7-root" class:window-unfocused={!$windowFocused} style={windowStyle}>
     <TitleBar
             title="Obtainintosh"
             focused={$windowFocused}
@@ -187,14 +211,14 @@
             shadeable
             draggable
             onclose={handleWindowClose}
-            oncollapse={handleWindowMinimize}
+            oncollapse={handleWindowResizeToFit}
             onshade={handleWindowShade}
             ondragstart={handleWindowDrag}
     />
 
     {#if !isWindowShaded}
         <!-- Notifications -->
-        <Notification notifications={$notifications} />
+        <Notification notifications={$notifications} ondismiss={(id) => notifications.remove(id)} />
 
         <!-- Main Content -->
         <main class="app-content">
@@ -219,44 +243,55 @@
             />
         </main>
     {/if}
+
+    <!-- Dialogs live inside the .s7-root frame so they inherit the System 7
+         font scope and the OS accent variables applied to the frame. -->
+    {#if showAddDialog}
+        <AddAppDialog
+                app={editingApp}
+                onclose={() => { showAddDialog = false; editingApp = null; }}
+                onadd={(e) => handleAddApp(e.url, e.name)}
+                onupdate={handleUpdateApp}
+        />
+    {/if}
+
+    {#if showSettings}
+        <SettingsPanel onclose={() => showSettings = false}/>
+    {/if}
+
+    {#if showConfirm}
+        <ConfirmDialog
+            message="Are you sure you want to remove {clickedApplicationName}?"
+            okText="Remove"
+            onconfirm={confirmRemove}
+            oncancel={cancelRemove}
+        />
+    {/if}
+
+    {#if showAboutDialog}
+        <AboutDialog onClose={() => showAboutDialog = false} />
+    {/if}
+
+    {#if downloadProgress}
+        <DownloadProgressDialog
+            fileName={downloadProgress.fileName}
+            downloaded={downloadProgress.downloaded}
+            total={downloadProgress.total}
+        />
+    {/if}
 </div>
-
-{#if showAddDialog}
-    <AddAppDialog
-            app={editingApp}
-            onclose={() => { showAddDialog = false; editingApp = null; }}
-            onadd={(e) => handleAddApp(e.url, e.name)}
-            onupdate={handleUpdateApp}
-    />
-{/if}
-
-{#if showSettings}
-    <SettingsPanel onclose={() => showSettings = false}/>
-{/if}
-
-{#if showConfirm}
-    <ConfirmDialog
-        message="Are you sure you want to remove {clickedApplicationName}?"
-        okText="Remove"
-        onconfirm={confirmRemove}
-        oncancel={cancelRemove}
-    />
-{/if}
-
-{#if showAboutDialog}
-    <AboutDialog onClose={() => showAboutDialog = false} />
-{/if}
-
-{#if downloadProgress}
-    <DownloadProgressDialog
-        fileName={downloadProgress.fileName}
-        downloaded={downloadProgress.downloaded}
-        total={downloadProgress.total}
-    />
-{/if}
 
 <style>
     .window-frame {
+        /* Monochrome System 7 defaults; the OS accent colors fetched at
+           runtime override these via the inline style. */
+        --system7-color-accent: #000;
+        --system7-color-accent-text: #fff;
+        --system7-color-highlight: #000;
+        --system7-color-highlight-text: #fff;
+        --system7-color-success: #000;
+        --system7-color-error: #000;
+        --system7-color-info: #000;
         /* Height must be explicit here for the main window */
         width: 100vw;
         height: 100vh;
@@ -265,6 +300,12 @@
         box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.2);
         display: flex;
         flex-direction: column;
+    }
+
+    .window-frame :global(.notification.success),
+    .window-frame :global(.notification.error),
+    .window-frame :global(.notification.info) {
+        border-left: 2px solid var(--system7-color-ink, #000);
     }
 
     .app-content {
