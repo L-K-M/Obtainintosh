@@ -1,5 +1,6 @@
 mod commands;
 mod models;
+mod system_colors;
 mod sources;
 mod storage;
 mod installer;
@@ -123,6 +124,7 @@ pub fn run() {
             commands::download_and_install,
             commands::get_settings,
             commands::update_settings,
+            commands::get_system_colors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,4 @@
-import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { currentMonitor, getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
 export class WindowManager {
     private static readonly TITLE_BAR_HEIGHT = 36;
@@ -28,6 +28,54 @@ export class WindowManager {
             await this.appWindow.setSize(size);
         } catch (e) {
             console.error('Failed to set window size:', e);
+        }
+    }
+
+    async resizeHeightBy(deltaHeight: number): Promise<void> {
+        if (!Number.isFinite(deltaHeight)) {
+            return;
+        }
+
+        try {
+            const [scaleFactor, innerSize, outerSize, outerPosition, monitor] = await Promise.all([
+                this.appWindow.scaleFactor(),
+                this.appWindow.innerSize(),
+                this.appWindow.outerSize(),
+                this.appWindow.outerPosition(),
+                currentMonitor()
+            ]);
+
+            const logicalInnerWidth = innerSize.width / scaleFactor;
+            const logicalInnerHeight = innerSize.height / scaleFactor;
+            const logicalOuterHeight = outerSize.height / scaleFactor;
+            const chromeHeight = Math.max(0, logicalOuterHeight - logicalInnerHeight);
+
+            const requestedInnerHeight = logicalInnerHeight + deltaHeight;
+            let maxInnerHeight = Number.POSITIVE_INFINITY;
+
+            if (monitor) {
+                const monitorBottomPx = monitor.workArea.position.y + monitor.workArea.size.height;
+                const availableOuterHeightPx = monitorBottomPx - outerPosition.y;
+                if (availableOuterHeightPx > 0) {
+                    maxInnerHeight = Math.max(
+                        WindowManager.TITLE_BAR_HEIGHT,
+                        availableOuterHeightPx / scaleFactor - chromeHeight
+                    );
+                }
+            }
+
+            const targetInnerHeight = Math.max(
+                WindowManager.TITLE_BAR_HEIGHT,
+                Math.min(requestedInnerHeight, maxInnerHeight)
+            );
+
+            if (Math.abs(targetInnerHeight - logicalInnerHeight) < 0.5) {
+                return;
+            }
+
+            await this.appWindow.setSize(new LogicalSize(logicalInnerWidth, targetInnerHeight));
+        } catch (e) {
+            console.error('Failed to resize window:', e);
         }
     }
 

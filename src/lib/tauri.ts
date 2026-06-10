@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { App, Settings } from './types';
+import type { App, Settings, SystemColors } from './types';
 
 export class TauriService {
     static async getAllApps(): Promise<App[]> {
@@ -32,5 +32,9 @@ export class TauriService {
 
     static async updateSettings(settings: Settings): Promise<void> {
         await invoke('update_settings', { settings });
+    }
+
+    static async getSystemColors(): Promise<SystemColors> {
+        return await invoke('get_system_colors');
     }
 }
