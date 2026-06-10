@@ -9,7 +9,9 @@
     import AppTable from '$lib/components/AppTable.svelte';
 
     import {getCurrentWindow} from '@tauri-apps/api/window';
+    import {listen} from '@tauri-apps/api/event';
     import {openUrl} from '@tauri-apps/plugin-opener';
+    import DownloadProgressDialog from '$lib/components/dialogs/DownloadProgressDialog.svelte';
     import {windowFocused} from '$lib/util/windowState';
     import AboutDialog from '$lib/components/dialogs/AboutDialog.svelte';
     import { WindowManager } from '$lib/windowManager';
@@ -26,6 +28,15 @@
     let confirmAppId: string | null = null;
     let showAboutDialog = false;
 
+    interface DownloadProgress {
+        appId: string;
+        fileName: string;
+        downloaded: number;
+        total: number | null;
+        done: boolean;
+    }
+    let downloadProgress: DownloadProgress | null = null;
+
     $: ({ apps, loading, error } = $appStore);
 
 
@@ -33,10 +44,15 @@
     const windowManager = new WindowManager();
 
     onMount(() => {
-        appStore.loadApps();
+        // Load the list, then quietly check for updates in the background
+        appStore.loadApps().then(() => appStore.checkForUpdates(true));
 
         appWindow.onFocusChanged(({payload: focused}) => {
             windowFocused.set(focused);
+        });
+
+        const unlistenProgress = listen<DownloadProgress>('download-progress', (event) => {
+            downloadProgress = event.payload.done ? null : event.payload;
         });
 
         const unlistenAddApp = appWindow.listen('menu-add-app', () => {
@@ -62,6 +78,7 @@
             unlistenCheckAll.then(fn => fn());
             unlistenSettings.then(fn => fn());
             unlistenAbout.then(fn => fn());
+            unlistenProgress.then(fn => fn());
         };
     });
 
@@ -94,11 +111,11 @@
     async function confirmRemove() {
         if (!confirmAppId) return;
 
-        const success = await appStore.removeApp(confirmAppId, clickedApplicationName);
-        if (success || true) {
-            showConfirm = false;
-            confirmAppId = null;
-        }
+        // Close the dialog regardless of outcome; the store surfaces errors
+        // via notifications.
+        await appStore.removeApp(confirmAppId, clickedApplicationName);
+        showConfirm = false;
+        confirmAppId = null;
     }
 
     function cancelRemove() {
@@ -228,6 +245,14 @@
 
 {#if showAboutDialog}
     <AboutDialog onClose={() => showAboutDialog = false} />
+{/if}
+
+{#if downloadProgress}
+    <DownloadProgressDialog
+        fileName={downloadProgress.fileName}
+        downloaded={downloadProgress.downloaded}
+        total={downloadProgress.total}
+    />
 {/if}
 
 <style>

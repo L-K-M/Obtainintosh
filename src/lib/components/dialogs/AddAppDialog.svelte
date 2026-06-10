@@ -14,21 +14,27 @@
   let loading = false;
   let error: string | null = null;
 
+  // Tracks the last auto-derived name so we keep updating it as the URL is
+  // typed, but stop as soon as the user edits the name themselves.
+  let autoFilledName = '';
+
   $: isEdit = !!app;
 
-  function detectAppName(url: string) {
-    try {
-      const parts = url.trim().split('/');
-      const repoName = parts[parts.length - 1] || parts[parts.length - 2];
-      name = repoName.replace(/\.git$/, '');
-    } catch (e) {
-      // Ignore errors
-    }
+  function deriveNameFromUrl(url: string): string | null {
+    const match = url.trim().match(/(?:github|gitlab)\.com\/[^/]+\/([^/?#]+)/i);
+    if (!match) return null;
+    const repoName = match[1].replace(/\.git$/, '');
+    return repoName || null;
   }
 
   function handleUrlChange() {
-    if (url && !name && !isEdit) {
-      detectAppName(url);
+    if (isEdit) return;
+    if (name && name !== autoFilledName) return;
+
+    const derived = deriveNameFromUrl(url);
+    if (derived) {
+      name = derived;
+      autoFilledName = derived;
     }
   }
   
@@ -103,7 +109,7 @@
 </MovableDialog>
 
 <style>
-  input {
+  .actions {
     display: flex;
     gap: 12px;
     justify-content: flex-end;
