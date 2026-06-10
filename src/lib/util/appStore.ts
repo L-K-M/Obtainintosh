@@ -50,7 +50,7 @@ function createAppStore() {
                 await TauriService.removeApp(id);
                 const apps = await TauriService.getAllApps();
                 update(s => ({ ...s, apps, loading: false }));
-                notifications.add('App removed successfully', 'success');
+                notifications.add(name ? `"${name}" removed` : 'App removed successfully', 'success');
                 return true;
             } catch (e) {
                 const error = e instanceof Error ? e.message : 'Failed to remove app';
