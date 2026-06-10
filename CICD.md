@@ -7,8 +7,9 @@ configured** — code signing and notarization are optional and only kick in whe
 the relevant secrets are present.
 
 Obtainintosh is a **Mac OS X** application (an "Obtainium for OS X") and only
-bundles a `.dmg`, so its release matrix is macOS-only. Its Rust backend happens to
-be platform-independent, so CI lints and tests it on a Linux runner for speed.
+bundles a `.dmg`, so its release matrix is macOS-only. Since the system accent
+color support, its Rust backend links against AppKit (`objc2-app-kit`), so CI
+lints and tests it on a macOS runner to exercise the real target.
 
 ## Workflows
 | Workflow | Trigger | Purpose |
@@ -23,20 +24,20 @@ The CI workflow has two parallel jobs:
 - **Frontend (check & build)** — installs npm dependencies with `npm ci`, runs
   `npm run check` (`svelte-kit sync` + `svelte-check`), then `npm run build`
   (`vite build`).
-- **Rust (fmt, clippy, test)** — installs the Tauri Linux system dependencies
-  (webview + GTK), builds the frontend into `build/` first (because
-  `tauri::generate_context!` embeds it at compile time), then runs
+- **Rust (fmt, clippy, test)** — builds the frontend into `build/` first
+  (because `tauri::generate_context!` embeds it at compile time), then runs
   `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test`. `Swatinem/rust-cache` caches the cargo build between runs. This job
-  runs on Ubuntu because Obtainintosh's backend has no macOS-only dependencies and
-  compiles cleanly on Linux; the macOS `.dmg` is built by the release workflow.
+  runs on macOS because the backend's system accent color support
+  (`#[cfg(target_os = "macos")]` + `objc2-app-kit`) only compiles there; the
+  macOS `.dmg` is built by the release workflow.
 
 Obtainintosh's `src-tauri` is a single crate (not a Cargo workspace), so the cargo
 commands run without `--workspace`.
 
-Since Obtainintosh is built on **Tauri v2**, the Linux Rust job needs the
-`libwebkit2gtk-4.1-dev` package (the 4.1 series). Tauri v1 projects use `-4.0-dev`
-instead.
+Since the Rust job runs on macOS, no Tauri Linux system packages are needed in
+CI. If a Linux job is ever added, Tauri v2 needs the `libwebkit2gtk-4.1-dev`
+package (the 4.1 series); Tauri v1 projects use `-4.0-dev` instead.
 
 ### Running CI checks locally
 
@@ -52,10 +53,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-On Linux you also need the Tauri system dependencies listed in `ci.yml`
-(`libwebkit2gtk-4.1-dev`, `build-essential`, `libxdo-dev`, `libssl-dev`,
-`libayatana-appindicator3-dev`, `librsvg2-dev`, etc.). On macOS none of these are
-required.
+On Linux you also need the Tauri system dependencies (`libwebkit2gtk-4.1-dev`,
+`build-essential`, `libxdo-dev`, `libssl-dev`, `libayatana-appindicator3-dev`,
+`librsvg2-dev`, etc.). On macOS none of these are required.
 
 ## Releases (`release.yml`)
 
