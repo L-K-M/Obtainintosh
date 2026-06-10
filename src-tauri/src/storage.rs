@@ -71,6 +71,11 @@ impl Storage {
         }
 
         let mut data = self.data.lock().unwrap();
+        if data.apps.iter().any(|a| {
+            a.source_url.trim_end_matches('/').eq_ignore_ascii_case(app.source_url.trim_end_matches('/'))
+        }) {
+            anyhow::bail!("This repository is already being tracked");
+        }
         data.apps.push(app.clone());
         drop(data);
 

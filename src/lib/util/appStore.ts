@@ -60,12 +60,16 @@ function createAppStore() {
             }
         },
 
-        checkForUpdates: async () => {
+        // `quiet` suppresses the success notification (used for the automatic
+        // check on launch); errors are always surfaced.
+        checkForUpdates: async (quiet = false) => {
             update(s => ({ ...s, loading: true, error: null }));
             try {
                 const apps = await TauriService.checkForUpdates();
                 update(s => ({ ...s, apps, loading: false }));
-                notifications.add('Update check completed', 'success');
+                if (!quiet) {
+                    notifications.add('Update check completed', 'success');
+                }
             } catch (e) {
                 const error = e instanceof Error ? e.message : 'Failed to check updates';
                 update(s => ({ ...s, error, loading: false }));

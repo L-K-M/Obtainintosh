@@ -1,15 +1,28 @@
 use crate::models::{Release, SourceType};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::time::Duration;
+
+pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
+
+/// Shared HTTP client for API calls: connection reuse plus a request timeout
+/// so a hung connection can't leave the UI stuck in "Checking..." forever.
+pub fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
 
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
     body: Option<String>,
+    assets: Vec<GitHubAsset>,
     #[serde(default)]
     draft: bool,
-    assets: Vec<GitHubAsset>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,25 +41,44 @@ impl GitHubAdapter {
         Self { token }
     }
 
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut request = http_client()
+            .get(url)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+
+        if let Some(token) = &self.token {
+            if !token.trim().is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", token));
+            }
+        }
+
+        request
+    }
+
     pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
         let (owner, repo) = Self::parse_github_url(repo_url)?;
 
         let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
 
-        let release = match self.fetch_release(&api_url).await {
-            Ok(release) => release,
-            // /releases/latest 404s for repos that only have prereleases.
-            // Fall back to the full release list and take the newest non-draft.
-            Err(FetchError::NotFound) => {
-                let list_url =
-                    format!("https://api.github.com/repos/{}/{}/releases?per_page=10", owner, repo);
-                self.fetch_release_list(&list_url)
-                    .await?
-                    .into_iter()
-                    .find(|r| !r.draft)
-                    .with_context(|| format!("No releases found for {}/{}", owner, repo))?
-            }
-            Err(FetchError::Other(e)) => return Err(e),
+        let response = self
+            .get(&api_url)
+            .send()
+            .await
+            .context("Failed to fetch GitHub release")?;
+
+        let release: GitHubRelease = if response.status() == reqwest::StatusCode::NOT_FOUND {
+            // `releases/latest` 404s when a repo only has pre-releases (common for
+            // nightly/continuous builds), so fall back to the release list.
+            self.get_newest_prerelease(&owner, &repo).await?
+        } else if !response.status().is_success() {
+            anyhow::bail!("GitHub API error: {}", response.status());
+        } else {
+            response
+                .json()
+                .await
+                .context("Failed to parse GitHub release")?
         };
 
         // Find macOS-compatible asset
@@ -63,109 +95,59 @@ impl GitHubAdapter {
         })
     }
 
-    fn request(&self, url: &str) -> Result<reqwest::RequestBuilder> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("Failed to build HTTP client")?;
+    async fn get_newest_prerelease(&self, owner: &str, repo: &str) -> Result<GitHubRelease> {
+        let api_url = format!("https://api.github.com/repos/{}/{}/releases?per_page=10", owner, repo);
 
-        let mut request = client
-            .get(url)
-            .header("User-Agent", concat!("Obtainintosh/", env!("CARGO_PKG_VERSION")))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28");
-
-        if let Some(token) = &self.token {
-            if !token.trim().is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", token));
-            }
-        }
-
-        Ok(request)
-    }
-
-    async fn fetch_release(&self, url: &str) -> std::result::Result<GitHubRelease, FetchError> {
-        let response = self.send(url).await?;
-        response
-            .json()
-            .await
-            .context("Failed to parse GitHub release")
-            .map_err(FetchError::Other)
-    }
-
-    async fn fetch_release_list(&self, url: &str) -> Result<Vec<GitHubRelease>> {
-        let response = self.send(url).await.map_err(|e| match e {
-            FetchError::NotFound => anyhow::anyhow!("Repository not found"),
-            FetchError::Other(e) => e,
-        })?;
-        response
-            .json()
-            .await
-            .context("Failed to parse GitHub release list")
-    }
-
-    async fn send(&self, url: &str) -> std::result::Result<reqwest::Response, FetchError> {
         let response = self
-            .request(url)
-            .map_err(FetchError::Other)?
+            .get(&api_url)
             .send()
             .await
-            .context("Failed to fetch GitHub release")
-            .map_err(FetchError::Other)?;
+            .context("Failed to fetch GitHub releases")?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(FetchError::NotFound);
-        }
         if !response.status().is_success() {
-            return Err(FetchError::Other(anyhow::anyhow!(
-                "GitHub API error: {}",
-                response.status()
-            )));
+            anyhow::bail!("GitHub API error: {}", response.status());
         }
 
-        Ok(response)
+        let releases: Vec<GitHubRelease> = response
+            .json()
+            .await
+            .context("Failed to parse GitHub releases")?;
+
+        releases
+            .into_iter()
+            .find(|r| !r.draft)
+            .context("No releases found for this repository")
     }
 
     fn parse_github_url(url: &str) -> Result<(String, String)> {
-        // Accept forms like:
-        //   https://github.com/owner/repo
-        //   https://github.com/owner/repo.git
-        //   https://github.com/owner/repo/releases (extra segments ignored)
-        //   github.com/owner/repo
-        let stripped = url
-            .trim()
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .trim_start_matches("www.");
+        let url = url.trim();
+        let without_scheme = url.split("://").last().unwrap_or(url);
+        let mut parts = without_scheme.split('/').filter(|s| !s.is_empty());
 
-        let path = stripped
-            .strip_prefix("github.com/")
-            .context("Invalid GitHub URL: expected github.com/<owner>/<repo>")?;
-
-        // Drop query string / fragment before splitting the path
-        let path = path.split(['?', '#']).next().unwrap_or("");
-
-        let mut segments = path.split('/').filter(|s| !s.is_empty());
-        let owner = segments
-            .next()
-            .context("Invalid GitHub URL: missing owner")?;
-        let repo = segments
-            .next()
-            .context("Invalid GitHub URL: missing repository name")?;
-
-        let repo = repo.trim_end_matches(".git");
-        if owner.is_empty() || repo.is_empty() {
-            anyhow::bail!("Invalid GitHub URL format");
+        let host = parts.next().unwrap_or_default();
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+            anyhow::bail!("Invalid GitHub URL: expected github.com/<owner>/<repo>");
         }
 
-        Ok((owner.to_string(), repo.to_string()))
+        // Ignore anything past owner/repo (e.g. /releases, /tree/main) as well as
+        // query strings, fragments, and a trailing .git.
+        let strip = |s: &str| s.split(['?', '#']).next().unwrap_or("").to_string();
+        let owner = strip(parts.next().context("GitHub URL is missing the repository owner")?);
+        let repo = strip(parts.next().context("GitHub URL is missing the repository name")?);
+        let repo = repo.trim_end_matches(".git").to_string();
+
+        if owner.is_empty() || repo.is_empty() {
+            anyhow::bail!("Invalid GitHub URL: expected github.com/<owner>/<repo>");
+        }
+
+        Ok((owner, repo))
     }
 
     fn find_macos_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
         log::debug!("Finding macOS asset from {} candidates", assets.len());
         // Priority order: dmg, pkg, app.tar.gz, tar.gz, zip
         // Note: Generic extensions (zip, tar.gz) require a keyword match to avoid picking up Windows/Linux files
-        let extensions = [".dmg", ".pkg", ".app.tar.gz", ".tar.gz", ".zip"];
+        let extensions = ["dmg", "pkg", "app.tar.gz", "tar.gz", "zip"];
         let macos_keywords = ["mac", "macos", "darwin", "osx", "universal", "arm64", "aarch64", "x86_64"];
 
         // Architecture preference: universal first, then the native architecture,
@@ -176,11 +158,15 @@ impl GitHubAdapter {
         let arch_tiers: [&[&str]; 2] = [&["universal"], &["x86_64", "intel", "x64"]];
 
         for ext in &extensions {
+            // Match ".{ext}" with the dot so e.g. "checksums-dmg" doesn't count as a dmg
+            let suffix = format!(".{}", ext);
+
+            // Candidates with macOS keywords, best architecture first
             let candidates: Vec<&GitHubAsset> = assets
                 .iter()
                 .filter(|a| {
                     let name_lower = a.name.to_lowercase();
-                    name_lower.ends_with(ext)
+                    name_lower.ends_with(&suffix)
                         && macos_keywords.iter().any(|kw| name_lower.contains(kw))
                 })
                 .collect();
@@ -202,10 +188,10 @@ impl GitHubAdapter {
 
             // Fallback: match extension only, BUT NOT for generic extensions like zip/tar.gz
             // We don't want to accidentally pick up a windows zip just because it's the only zip
-            let is_generic = [".zip", ".tar.gz"].contains(ext);
+            let is_generic = ["zip", "tar.gz"].contains(ext);
             if !is_generic {
                 if let Some(asset) = assets.iter().find(|a| {
-                    a.name.to_lowercase().ends_with(ext)
+                    a.name.to_lowercase().ends_with(&suffix)
                 }) {
                     log::debug!("Selected asset (extension match): {}", asset.name);
                     return Some(asset);
@@ -216,11 +202,6 @@ impl GitHubAdapter {
         log::debug!("No suitable asset found");
         None
     }
-}
-
-enum FetchError {
-    NotFound,
-    Other(anyhow::Error),
 }
 
 /// Strip a single leading "v" from a version tag, but only when it actually
@@ -263,31 +244,49 @@ mod tests {
             GitHubAdapter::parse_github_url("https://github.com/owner/repo").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
+        assert_eq!(
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo/").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert_eq!(
+            GitHubAdapter::parse_github_url("github.com/owner/repo").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
     }
 
     #[test]
-    fn test_parse_github_url_variants() {
-        for url in [
-            "https://github.com/owner/repo/",
-            "https://github.com/owner/repo.git",
-            "https://github.com/owner/repo/releases/latest",
-            "https://www.github.com/owner/repo",
-            "github.com/owner/repo",
-            "https://github.com/owner/repo?tab=readme-ov-file",
-            "  https://github.com/owner/repo  ",
-        ] {
-            assert_eq!(
-                GitHubAdapter::parse_github_url(url).unwrap(),
-                ("owner".to_string(), "repo".to_string()),
-                "failed for {}",
-                url
-            );
-        }
+    fn test_parse_github_url_extra_segments() {
+        // URLs deeper than the repo root should still resolve to owner/repo
+        assert_eq!(
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo/releases/latest").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert_eq!(
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo/tree/main/src").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_github_url_git_suffix_and_query() {
+        assert_eq!(
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo.git").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert_eq!(
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo?tab=readme").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert_eq!(
+            GitHubAdapter::parse_github_url("https://www.github.com/owner/repo#readme").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
     }
 
     #[test]
     fn test_parse_github_url_invalid() {
         assert!(GitHubAdapter::parse_github_url("https://github.com/owner").is_err());
+        assert!(GitHubAdapter::parse_github_url("https://github.com/").is_err());
         assert!(GitHubAdapter::parse_github_url("https://example.com/owner/repo").is_err());
         assert!(GitHubAdapter::parse_github_url("not a url").is_err());
     }
@@ -299,6 +298,15 @@ mod tests {
         assert_eq!(clean_version_tag("V2.0"), "2.0");
         assert_eq!(clean_version_tag("version-2"), "version-2");
         assert_eq!(clean_version_tag("vapor"), "vapor");
+    }
+
+    #[test]
+    fn test_asset_extension_requires_dot() {
+        // "checksums-dmg" must not be mistaken for a .dmg file
+        let assets = vec![asset("checksums-dmg"), asset("MyApp-macos.zip")];
+
+        let selected = GitHubAdapter::find_macos_asset(&assets).unwrap();
+        assert_eq!(selected.name, "MyApp-macos.zip");
     }
 
     #[test]
@@ -340,13 +348,6 @@ mod tests {
         assert_eq!(selected.name, "tool-macos-arm64.dmg");
         #[cfg(not(target_arch = "aarch64"))]
         assert_eq!(selected.name, "tool-macos-x86_64.dmg");
-    }
-
-    #[test]
-    fn test_extension_requires_dot() {
-        // "amdmg" must not satisfy the ".dmg" rule
-        let assets = vec![asset("tool-amdmg")];
-        assert!(GitHubAdapter::find_macos_asset(&assets).is_none());
     }
 
     #[test]

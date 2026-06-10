@@ -1,12 +1,22 @@
 use crate::models::{App, Settings, SourceType};
 use crate::sources::GitHubAdapter;
 use crate::storage::Storage;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 pub struct AppState {
     pub storage: Arc<Storage>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    app_id: String,
+    file_name: String,
+    downloaded: u64,
+    total: Option<u64>,
+    done: bool,
 }
 
 #[tauri::command]
@@ -23,15 +33,6 @@ pub async fn add_app(
     // Detect source type
     let source_type = crate::sources::detect_source_type(&url)
         .ok_or_else(|| "Unsupported source URL".to_string())?;
-
-    // Prevent tracking the same source twice
-    let existing = state.storage.get_all_apps().map_err(|e| e.to_string())?;
-    if let Some(dup) = existing
-        .iter()
-        .find(|a| a.source_url.trim_end_matches('/') == url.trim_end_matches('/'))
-    {
-        return Err(format!("\"{}\" already tracks this URL", dup.name));
-    }
 
     // Check if app is already installed
     let (current_version, install_path) = if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
@@ -51,7 +52,8 @@ pub async fn add_app(
         last_checked: None,
     };
 
-    // Storage assigns the UUID and returns the stored record
+    // Storage assigns the UUID, rejects duplicate source URLs, and returns
+    // the stored record
     state.storage.add_app(app).map_err(|e| e.to_string())
 }
 
@@ -109,12 +111,18 @@ pub async fn check_for_updates(
     let mut updated_apps = Vec::new();
     
     for mut app in apps {
-        // Re-detect installed version
-        if let Some((path, version)) = crate::installer::detect_installed_app(&app.name) {
-            app.current_version = Some(version);
-            app.install_path = Some(path);
+        // Re-detect installed version; clear stale state if the app was uninstalled
+        match crate::installer::detect_installed_app(&app.name) {
+            Some((path, version)) => {
+                app.current_version = Some(version);
+                app.install_path = Some(path);
+            }
+            None => {
+                app.current_version = None;
+                app.install_path = None;
+            }
         }
-        
+
         let result = match app.source_type {
             SourceType::GitHub => {
                 let adapter = GitHubAdapter::new(settings.github_token.clone());
@@ -159,6 +167,7 @@ pub async fn update_settings(
 #[tauri::command]
 pub async fn download_and_install(
     app_id: String,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let app = state
@@ -185,12 +194,39 @@ pub async fn download_and_install(
     };
     
     log::info!("Downloading {} from {}", release.file_name, release.download_url);
-    
-    // Download file
-    let download_path = download_file(&release.download_url, &release.file_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    
+
+    // Download file, emitting progress events for the frontend
+    let progress_handle = app_handle.clone();
+    let progress_app_id = app_id.clone();
+    let progress_file_name = release.file_name.clone();
+    let download_result = download_file(&release.download_url, &release.file_name, move |downloaded, total| {
+        let _ = progress_handle.emit(
+            "download-progress",
+            DownloadProgress {
+                app_id: progress_app_id.clone(),
+                file_name: progress_file_name.clone(),
+                downloaded,
+                total,
+                done: false,
+            },
+        );
+    })
+    .await;
+
+    // Always emit a final "done" event so the frontend can close its progress UI
+    let _ = app_handle.emit(
+        "download-progress",
+        DownloadProgress {
+            app_id: app_id.clone(),
+            file_name: release.file_name.clone(),
+            downloaded: release.file_size.unwrap_or(0),
+            total: release.file_size,
+            done: true,
+        },
+    );
+
+    let download_path = download_result.map_err(|e| e.to_string())?;
+
     log::info!("Downloaded to {}", download_path);
     
     // Instead of trying to install automatically (which requires special entitlements),
@@ -223,45 +259,69 @@ pub async fn download_and_install(
     Ok(format!("Download finished: {}\n\nThe file has been revealed in Finder. Please double-click it to install.", download_path))
 }
 
-async fn download_file(url: &str, filename: &str) -> Result<String> {
+async fn download_file(
+    url: &str,
+    filename: &str,
+    on_progress: impl Fn(u64, Option<u64>),
+) -> Result<String> {
     log::debug!("download_file called with url={}, filename={}", url, filename);
 
-    // The filename comes from the GitHub API; refuse anything that could
-    // escape the cache directory.
-    if filename.is_empty() || filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
-        anyhow::bail!("Refusing to download asset with unsafe file name: {}", filename);
-    }
+    // Asset names come from the GitHub API; keep only the final path component
+    // so a malicious name can't escape the cache directory
+    let filename = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Invalid asset file name")?;
 
     // Use system temp directory
     let cache_dir = std::env::temp_dir().join("obtainintosh-downloads");
-
-    log::debug!("Cache dir: {:?}", cache_dir);
     std::fs::create_dir_all(&cache_dir)?;
 
     let file_path = cache_dir.join(filename);
     log::debug!("File path: {:?}", file_path);
 
-    log::debug!("Fetching URL...");
     // Connect timeout only: a total request timeout would abort large,
     // slow downloads that are progressing fine.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
-        .build()?;
+        .build()
+        .context("Failed to build HTTP client")?;
     let mut response = client
         .get(url)
+        .header("User-Agent", crate::sources::USER_AGENT)
         .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("Download failed: {}", e))?;
+        .await
+        .context("Failed to start download")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Download failed: server returned {}", response.status());
+    }
+
+    let total = response.content_length();
+    on_progress(0, total);
 
     // Stream to disk instead of buffering the whole asset in memory
-    let mut file = std::fs::File::create(&file_path)?;
+    let mut file = tokio::fs::File::create(&file_path)
+        .await
+        .context("Failed to create download file")?;
     let mut downloaded: u64 = 0;
-    while let Some(chunk) = response.chunk().await? {
-        std::io::Write::write_all(&mut file, &chunk)?;
+    let mut last_reported: u64 = 0;
+
+    while let Some(chunk) = response.chunk().await.context("Failed while downloading")? {
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .context("Failed to write download file")?;
         downloaded += chunk.len() as u64;
+
+        // Throttle progress events to roughly every 256 KB
+        if downloaded - last_reported >= 256 * 1024 {
+            on_progress(downloaded, total);
+            last_reported = downloaded;
+        }
     }
-    std::io::Write::flush(&mut file)?;
+
+    tokio::io::AsyncWriteExt::flush(&mut file).await?;
+    on_progress(downloaded, total);
     log::debug!("Downloaded {} bytes to {:?}", downloaded, file_path);
 
     Ok(file_path.to_string_lossy().to_string())
