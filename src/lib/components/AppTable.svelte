@@ -54,8 +54,9 @@
             // Fall through to string comparison
         }
 
-        // Fallback for non-semver versions
-        return latest > current;
+        // Fallback for non-semver versions: numeric-aware compare so "10.0"
+        // is newer than "9.0" (plain string compare would say otherwise)
+        return collator.compare(latest, current) > 0;
     }
 
     $: sortedApps = [...apps].sort((a, b) => {

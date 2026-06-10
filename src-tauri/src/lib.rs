@@ -1,5 +1,6 @@
 mod commands;
 mod models;
+mod system_colors;
 mod sources;
 mod storage;
 mod installer;
@@ -22,7 +23,6 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
         .manage(app_state)
         .setup(|app| {
             // Create custom menu items
@@ -127,6 +127,7 @@ pub fn run() {
             commands::update_settings,
             updates::check_self_update,
             updates::open_release_url,
+            commands::get_system_colors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,7 +2,7 @@
     import {onMount} from 'svelte';
     import {TauriService} from '$lib/tauri';
     import type {Settings} from '$lib/types';
-    import {BalloonHelp, Button, MovableDialog} from '@lkmc/system7-ui';
+    import {BalloonHelp, Button, MovableDialog, TextInput} from '@lkmc/system7-ui';
     import {openUrl} from '@tauri-apps/plugin-opener';
 
     export let onclose: (() => void) | undefined = undefined;
@@ -46,13 +46,16 @@
 
 <MovableDialog title="Settings" onclose={close}>
     <form on:submit={handleSave}>
-        <div class="form-group">
+        <div class="s7-form-group">
             <label for="github-token">GitHub Personal Access Token</label>
-            <input
+            <TextInput
                     id="github-token"
                     type="password"
+                    clearable
                     placeholder="ghp_xxxxxxxxxxxx (optional)"
-                    bind:value={settings.github_token}
+                    value={settings.github_token ?? ''}
+                    oninput={(value) => (settings.github_token = value || null)}
+                    onclear={() => (settings.github_token = null)}
             />
             <div class="hint">
                 <BalloonHelp message="Generate a fine-grained token with read-only access to public repositories">
@@ -97,6 +100,11 @@
 
 <style>
     /* Local overrides only - most styles are now global */
+    .s7-form-group :global(.sys7-text-input) {
+        flex: 1;
+        width: 100%;
+    }
+
     .hint {
         color: #000;
         display: flex;
