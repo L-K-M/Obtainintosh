@@ -6,12 +6,13 @@ use crate::sources::GitHubAdapter;
 use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
 use crate::system_colors;
 use anyhow::{Context, Result};
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
+use tokio::task::JoinSet;
 
 pub struct AppState {
     pub storage: Arc<Storage>,
@@ -82,6 +83,7 @@ pub struct CheckOutcome {
     message: Option<String>,
 }
 
+#[derive(Clone)]
 struct PendingCheck {
     app: App,
     current_version: Option<String>,
@@ -259,19 +261,21 @@ pub async fn check_for_updates(
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
     let detected = detect_apps_for_check(apps.clone(), is_batch).await?;
-    let pending_checks =
-        apps.into_iter()
-            .zip(detected)
-            .map(|(app, (current_version, install_path))| PendingCheck {
-                app,
-                current_version,
-                install_path,
-            });
+    let pending_checks = apps
+        .into_iter()
+        .zip(detected)
+        .map(|(app, (current_version, install_path))| PendingCheck {
+            app,
+            current_version,
+            install_path,
+        })
+        .collect::<Vec<_>>();
     let github_token = settings.github_token;
-    let completed = collect_bounded_ordered(
-        pending_checks,
+    let completed_results = collect_bounded_ordered(
+        0..pending_checks.len(),
         GITHUB_CHECK_CONCURRENCY,
-        |pending| {
+        |index| {
+            let pending = pending_checks[index].clone();
             let adapter = GitHubAdapter::new(github_token.clone());
             async move {
                 let (result, failure_state) = match pending.app.source_type {
@@ -296,6 +300,22 @@ pub async fn check_for_updates(
         },
     )
     .await;
+    let completed = completed_results
+        .into_iter()
+        .zip(pending_checks)
+        .map(|(result, pending)| match result {
+            Ok(completed) => completed,
+            Err(error) => {
+                log::error!("Update check task failed for {}: {error}", pending.app.name);
+                CompletedCheck {
+                    pending,
+                    result: Err(anyhow::anyhow!("Update check task failed: {error}")),
+                    failure_state: CheckAttemptState::Failed,
+                    attempted_at: chrono::Utc::now().to_rfc3339(),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
     let mut outcomes = Vec::with_capacity(completed.len());
 
     for completed in completed {
@@ -409,16 +429,22 @@ async fn detect_apps_for_check(
     .map_err(|error| format!("Installed-app detection failed: {error}"))
 }
 
-async fn collect_bounded_ordered<I, F, Fut, T>(inputs: I, limit: usize, mut operation: F) -> Vec<T>
+async fn collect_bounded_ordered<I, F, Fut, T>(
+    inputs: I,
+    limit: usize,
+    mut operation: F,
+) -> Vec<std::result::Result<T, tokio::task::JoinError>>
 where
     I: IntoIterator,
     F: FnMut(I::Item) -> Fut,
-    Fut: Future<Output = T>,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
     assert!(limit > 0, "bounded operation limit must be positive");
 
     let mut inputs = inputs.into_iter().enumerate();
-    let mut in_flight = FuturesUnordered::new();
+    let mut in_flight = JoinSet::new();
+    let mut task_indices = HashMap::new();
     let mut results = Vec::new();
 
     for _ in 0..limit {
@@ -426,27 +452,38 @@ where
             break;
         };
         results.push(None);
-        let future = operation(input);
-        in_flight.push(indexed_future(index, future));
+        let task = in_flight.spawn(operation(input));
+        task_indices.insert(task.id(), index);
     }
 
-    while let Some((index, result)) = in_flight.next().await {
-        results[index] = Some(result);
+    while let Some(joined) = in_flight.join_next_with_id().await {
+        match joined {
+            Ok((task_id, result)) => {
+                let index = task_indices
+                    .remove(&task_id)
+                    .expect("completed bounded task must have an input index");
+                results[index] = Some(Ok(result));
+            }
+            Err(error) => {
+                let index = task_indices
+                    .remove(&error.id())
+                    .expect("failed bounded task must have an input index");
+                results[index] = Some(Err(error));
+            }
+        }
+
         if let Some((next_index, input)) = inputs.next() {
             results.push(None);
-            let future = operation(input);
-            in_flight.push(indexed_future(next_index, future));
+            let task = in_flight.spawn(operation(input));
+            task_indices.insert(task.id(), next_index);
         }
     }
 
+    debug_assert!(task_indices.is_empty());
     results
         .into_iter()
         .map(|result| result.expect("every bounded operation must complete"))
         .collect()
-}
-
-async fn indexed_future<Fut: Future>(index: usize, future: Fut) -> (usize, Fut::Output) {
-    (index, future.await)
 }
 
 #[tauri::command]
@@ -869,10 +906,26 @@ mod tests {
                 input
             }
         })
-        .await;
+        .await
+        .into_iter()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
 
         assert_eq!(results, (0_u64..8).collect::<Vec<_>>());
         assert_eq!(maximum.load(Ordering::SeqCst), 2);
         assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_operation_join_failures_keep_their_input_slot() {
+        let results = collect_bounded_ordered(0..3, 2, |input| async move {
+            assert_ne!(input, 1, "simulated task panic");
+            input
+        })
+        .await;
+
+        assert_eq!(*results[0].as_ref().unwrap(), 0);
+        assert!(results[1].as_ref().unwrap_err().is_panic());
+        assert_eq!(*results[2].as_ref().unwrap(), 2);
     }
 }
