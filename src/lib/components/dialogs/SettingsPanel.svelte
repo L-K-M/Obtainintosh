@@ -2,6 +2,7 @@
     import {onMount} from 'svelte';
     import {TauriService} from '$lib/tauri';
     import type {Settings} from '$lib/types';
+    import {getErrorMessage} from '$lib/util/errors';
     import {BalloonHelp, Button, MovableDialog, TextInput} from '@lkmc/system7-ui';
     import {openUrl} from '@tauri-apps/plugin-opener';
 
@@ -16,7 +17,7 @@
         try {
             settings = await TauriService.getSettings();
         } catch (e) {
-            error = 'Failed to load settings';
+            error = getErrorMessage(e, 'Failed to load settings');
         }
     });
 
@@ -37,7 +38,7 @@
                 close();
             }, 1000);
         } catch (e) {
-            error = e instanceof Error ? e.message : 'Failed to save settings';
+            error = getErrorMessage(e, 'Failed to save settings');
         } finally {
             loading = false;
         }

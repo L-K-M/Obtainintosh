@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getErrorMessage } from '$lib/util/errors';
+import { notifications } from '$lib/util/notifications';
 
 /**
  * Lightweight in-app update check. Asks the Rust `check_for_update` command (which
@@ -55,5 +57,6 @@ export async function openReleasePage(url: string): Promise<void> {
     await invoke('open_release_url', { url });
   } catch (error) {
     console.warn('Failed to open release page:', error);
+    notifications.add(getErrorMessage(error, 'Failed to open release page'), 'error');
   }
 }

@@ -23,6 +23,7 @@
     import { WindowManager } from '$lib/windowManager';
 
     import { appStore } from '$lib/util/appStore';
+    import { getErrorMessage } from '$lib/util/errors';
     import { notifications } from '$lib/util/notifications';
     import { TauriService } from '$lib/tauri';
 
@@ -152,8 +153,7 @@
         try {
             await openUrl(url);
         } catch (e) {
-            // console.error('Failed to open URL:', e);
-            notifications.add('Failed to open URL', 'error');
+            notifications.add(getErrorMessage(e, 'Failed to open URL'), 'error');
         }
     }
 
