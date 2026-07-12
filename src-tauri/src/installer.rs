@@ -129,6 +129,14 @@ mod tests {
             )),
             Some(Path::new("/Applications/Obtainintosh.app"))
         );
+        // With nested bundles the innermost wins — that is the bundle the
+        // binary actually belongs to.
+        assert_eq!(
+            enclosing_bundle(Path::new(
+                "/x/Outer.app/Contents/Frameworks/Inner.app/Contents/MacOS/inner"
+            )),
+            Some(Path::new("/x/Outer.app/Contents/Frameworks/Inner.app"))
+        );
     }
 
     /// `check_for_updates` relies on the dev-build path: outside a .app bundle

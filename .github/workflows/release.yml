@@ -66,6 +66,16 @@ jobs:
           # behind by a failed earlier run.
           release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
             --jq '.id' 2>/dev/null || true)"
+          if [ -n "$release_id" ]; then
+            # The tag lookup only returns published releases, and this rebuild
+            # is about to delete-and-replace its assets one by one. Flip the
+            # release back to draft so nobody downloads from a half-replaced
+            # asset list; publish-release makes it public again once every
+            # build job has uploaded.
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --method PATCH --field draft=true --silent
+            echo "Re-drafted published release ${release_id} while its assets rebuild"
+          fi
           if [ -z "$release_id" ]; then
             # --paginate emits one JSON array per page; jq handles the
             # concatenated arrays and head takes the first match, if any.

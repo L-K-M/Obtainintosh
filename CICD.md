@@ -88,6 +88,16 @@ commit's *source* — so if the workflow changed since the tag, a re-dispatch
 runs the new pipeline against the old code, which is usually exactly what you
 want for fixing a broken release run.
 
+Re-dispatching a tag whose release is already published temporarily flips the
+release back to draft while the bundles rebuild, then re-publishes it — so
+nobody downloads from a half-replaced asset list mid-run.
+
+Dispatching a release requires write access to the repository — the same trust
+boundary as pushing a `v*.*.*` tag, so the manual path does not widen who can
+cut releases. If the repository ever gains multiple writers plus tag
+protection rules, gate this workflow with a protected environment (required
+reviewers) to keep the two paths equivalent.
+
 The workflow:
 
 1. **Creates a draft GitHub Release** named `Obtainintosh v1.2.3` with
