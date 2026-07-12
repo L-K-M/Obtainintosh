@@ -40,7 +40,7 @@
 
     async function handleSave(event: Event) {
         event.preventDefault();
-        if (initialLoading || loading) return;
+        if (initialLoading || loading || success) return;
 
         try {
             loading = true;
@@ -68,7 +68,7 @@
                     id="github-token"
                     type="password"
                     clearable
-                    disabled={initialLoading || loading}
+                    disabled={initialLoading || loading || success}
                     placeholder="ghp_xxxxxxxxxxxx (optional)"
                     value={settings.github_token ?? ''}
                     oninput={(value) => (settings.github_token = value || null)}
@@ -108,7 +108,7 @@
             <Button type="button" onclick={close} disabled={loading}>
                 Cancel
             </Button>
-            <Button type="submit" variant="primary" disabled={initialLoading || loading}>
+            <Button type="submit" variant="primary" disabled={initialLoading || loading || success}>
                 Save
             </Button>
         </div>
