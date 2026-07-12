@@ -4,19 +4,23 @@ use serde::Deserialize;
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
-/// Canonical form for "is this the same repository?" comparisons: lowercased,
-/// `http://` folded into `https://`, ignoring a trailing slash and a trailing
-/// `.git`. Shared by `Storage::add_app`'s dedupe and `updates::is_self_app` so
-/// the two checks can't drift apart.
+/// Canonical form for "is this the same repository?" comparisons: lowercased
+/// first (so `.GIT` trims like `.git`), then stripped of a trailing slash and
+/// `.git`, with `http://` folded into `https://` and a `www.` host prefix
+/// dropped. Shared by `Storage::add_app`'s dedupe and `updates::is_self_app`
+/// so the two checks can't drift apart.
 pub(crate) fn normalize_repo_url(url: &str) -> String {
-    let url = url
+    let lower = url.to_ascii_lowercase();
+    let trimmed = lower
         .trim_end_matches('/')
         .trim_end_matches(".git")
-        .trim_end_matches('/')
-        .to_ascii_lowercase();
-    match url.strip_prefix("http://") {
-        Some(rest) => format!("https://{rest}"),
-        None => url,
+        .trim_end_matches('/');
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"));
+    match rest {
+        Some(rest) => format!("https://{}", rest.strip_prefix("www.").unwrap_or(rest)),
+        None => trimmed.to_string(),
     }
 }
 
@@ -303,7 +307,10 @@ mod tests {
             "https://GitHub.com/owner/repo/",
             "https://github.com/owner/repo.git",
             "https://github.com/owner/repo.git/",
+            "https://github.com/owner/repo.GIT",
             "http://github.com/owner/repo",
+            "https://www.github.com/owner/repo",
+            "http://WWW.github.com/owner/repo.Git/",
         ] {
             assert_eq!(
                 super::normalize_repo_url(url),
