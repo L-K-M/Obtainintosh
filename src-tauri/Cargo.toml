@@ -1,8 +1,9 @@
 [package]
 name = "obtainintosh"
 version = "1.0.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A macOS app for tracking and downloading app updates from GitHub Releases."
+authors = ["Lukas Mathis"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
