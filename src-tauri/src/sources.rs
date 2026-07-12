@@ -196,17 +196,15 @@ impl GitHubAdapter {
         let extensions = [".dmg", ".pkg", ".app.tar.gz", ".tar.gz", ".zip"];
         let macos_markers = ["mac", "macos", "macosx", "darwin", "osx"];
         let other_os_markers = [
-            "windows", "win", "win32", "win64", "linux", "linux32", "linux64", "ubuntu",
-            "debian", "android", "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
+            "windows", "win", "win32", "win64", "linux", "linux32", "linux64", "ubuntu", "debian",
+            "android", "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
         ];
 
         let selected = assets
             .iter()
             .filter_map(|asset| {
                 let name = asset.name.to_ascii_lowercase();
-                let package_rank = extensions
-                    .iter()
-                    .position(|ext| name.ends_with(ext))?;
+                let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
 
                 if other_os_markers
                     .iter()
@@ -235,8 +233,8 @@ impl GitHubAdapter {
                     .iter()
                     .any(|marker| has_name_marker(&name, marker));
                 let unsupported_cpu = [
-                    "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786",
-                    "x86_32", "x86-32", "powerpc", "ppc64", "riscv64",
+                    "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786", "x86_32",
+                    "x86-32", "powerpc", "ppc64", "riscv64",
                 ]
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
@@ -519,8 +517,7 @@ mod tests {
 
         for (target_arch, names, expected) in cases {
             let assets: Vec<_> = names.iter().map(|name| asset(name)).collect();
-            let selected =
-                GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
+            let selected = GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
             assert_eq!(selected.name, *expected);
         }
     }
@@ -555,8 +552,7 @@ mod tests {
 
         for (target_arch, names, expected) in cases {
             let assets: Vec<_> = names.iter().map(|name| asset(name)).collect();
-            let selected =
-                GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
+            let selected = GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
             assert_eq!(selected.name, *expected);
         }
     }
