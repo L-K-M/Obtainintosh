@@ -13,6 +13,7 @@
     } from '@lkmc/system7-ui';
     import Toolbar from '$lib/components/Toolbar.svelte';
     import AppTable from '$lib/components/AppTable.svelte';
+    import UpdateNotice from '$lib/components/UpdateNotice.svelte';
 
     import {getCurrentWindow} from '@tauri-apps/api/window';
     import {listen} from '@tauri-apps/api/event';
@@ -212,10 +213,14 @@
             ondragstart={handleWindowDrag}
     />
 
-    {#if !isWindowShaded}
-        <!-- Notifications -->
-        <Notification notifications={$notifications} ondismiss={(id) => notifications.remove(id)} />
+    <div class="notification-stack">
+        {#if !isWindowShaded}
+            <Notification notifications={$notifications} ondismiss={(id) => notifications.remove(id)} />
+        {/if}
+        <UpdateNotice />
+    </div>
 
+    {#if !isWindowShaded}
         <!-- Main Content -->
         <main class="app-content">
             <Toolbar
@@ -301,6 +306,21 @@
     .window-frame :global(.notification.error),
     .window-frame :global(.notification.info) {
         border-left: 2px solid var(--system7-color-ink, #000);
+    }
+
+    .notification-stack {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        z-index: var(--system7-z-notification, 1000);
+        display: flex;
+        flex-direction: column-reverse;
+        align-items: flex-end;
+        gap: 12px;
+    }
+
+    .notification-stack :global(.notification) {
+        position: static;
     }
 
     .app-content {
