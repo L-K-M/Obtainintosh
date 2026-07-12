@@ -227,20 +227,18 @@ impl GitHubAdapter {
         releases: &[GitHubRelease],
         stable_release_published: bool,
     ) -> Result<&GitHubRelease> {
-        let stable = if stable_release_published {
-            Self::find_compatible_release(releases, false)
+        let (prerelease, channel) = if stable_release_published {
+            (false, "stable")
         } else {
-            None
+            (true, "prerelease")
         };
 
-        stable
-            .or_else(|| Self::find_compatible_release(releases, true))
-            .with_context(|| {
-                format!(
-                    "No macOS-compatible release found in the {} most recent GitHub releases",
-                    RECENT_RELEASE_LIMIT
-                )
-            })
+        Self::find_compatible_release(releases, prerelease).with_context(|| {
+            format!(
+                "No macOS-compatible {} release found in the {} most recent GitHub releases",
+                channel, RECENT_RELEASE_LIMIT
+            )
+        })
     }
 
     fn find_compatible_release(
@@ -520,8 +518,13 @@ mod tests {
         let selected = GitHubAdapter::select_recent_release(&releases, true).unwrap();
         assert_eq!(selected.tag_name, "v1.9.0");
 
-        let selected = GitHubAdapter::select_recent_release(&releases[..2], true).unwrap();
-        assert_eq!(selected.tag_name, "v2.1.0-beta.1");
+        let error = GitHubAdapter::select_recent_release(&releases[..2], true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "No macOS-compatible stable release found in the 10 most recent GitHub releases"
+        );
     }
 
     #[test]
@@ -541,9 +544,9 @@ mod tests {
     }
 
     #[test]
-    fn no_compatible_recent_release_has_clear_error() {
+    fn compatible_prerelease_does_not_satisfy_stable_policy() {
         let releases = parse_releases(include_str!(
-            "../test-data/github/no-compatible-release.json"
+            "../test-data/github/no-compatible-stable-release.json"
         ));
 
         let error = GitHubAdapter::select_recent_release(&releases, true)
@@ -551,7 +554,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "No macOS-compatible release found in the 10 most recent GitHub releases"
+            "No macOS-compatible stable release found in the 10 most recent GitHub releases"
         );
     }
 
