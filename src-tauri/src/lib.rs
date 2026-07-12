@@ -126,8 +126,10 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             updates::check_self_update,
+            updates::open_release_url,
             commands::get_system_colors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

@@ -77,6 +77,18 @@ pub async fn check_self_update() -> Result<Option<UpdateInfo>, String> {
     }
 }
 
+/// Opens a release page in the user's default browser. Restricted to http(s) so the
+/// frontend can only ever hand it a web link. Bundled here so this update feature is a
+/// self-contained drop-in (no dependency on the app's own URL-opener command).
+#[tauri::command]
+pub fn open_release_url(url: String) -> Result<(), String> {
+    let lower = url.to_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("Only http(s) URLs may be opened".to_string());
+    }
+    open::that(&url).map_err(|e| e.to_string()).map(|_| ())
+}
+
 /// Drops a leading `v`/`V` (Git tags) leaving the bare version.
 fn normalize(version: &str) -> String {
     version.trim_start_matches(['v', 'V']).to_string()
