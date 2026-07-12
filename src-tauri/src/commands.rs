@@ -43,9 +43,7 @@ impl Drop for InFlightDownloadGuard {
     }
 }
 
-fn lock_in_flight_downloads(
-    downloads: &Mutex<HashSet<String>>,
-) -> MutexGuard<'_, HashSet<String>> {
+fn lock_in_flight_downloads(downloads: &Mutex<HashSet<String>>) -> MutexGuard<'_, HashSet<String>> {
     downloads.lock().unwrap_or_else(|poisoned| {
         log::warn!("In-flight download state was poisoned; recovering its last known state");
         let guard = poisoned.into_inner();
@@ -683,11 +681,7 @@ mod tests {
 
         ensure_private_cache_directory(&cache).unwrap();
         assert_eq!(
-            std::fs::metadata(&cache)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
             0o700
         );
 
@@ -697,19 +691,11 @@ mod tests {
         create_private_directory(&operation).unwrap();
 
         assert_eq!(
-            std::fs::metadata(&cache)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
             0o700
         );
         assert_eq!(
-            std::fs::metadata(&operation)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&operation).unwrap().permissions().mode() & 0o777,
             0o700
         );
         std::fs::remove_dir_all(root).unwrap();
