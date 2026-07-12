@@ -13,9 +13,13 @@ pub struct App {
     pub name: String,
     pub source_type: SourceType,
     pub source_url: String,
+    #[serde(default)]
     pub current_version: Option<String>,
+    #[serde(default)]
     pub latest_version: Option<String>,
+    #[serde(default)]
     pub install_path: Option<String>,
+    #[serde(default)]
     pub last_checked: Option<String>, // ISO 8601 timestamp
 }
 
@@ -29,9 +33,11 @@ pub struct Release {
     pub release_notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
     pub github_token: Option<String>,
+    #[serde(default)]
     pub gitlab_token: Option<String>,
 }
 
@@ -43,26 +49,14 @@ pub struct SystemColors {
     pub highlight_text_color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
     pub apps: Vec<App>,
+    #[serde(default)]
     pub settings: Settings,
     /// One-shot marker: Obtainintosh's own entry has been seeded into this data
     /// file. Once set, a user who removes the entry keeps it removed — it is
     /// never re-added on later launches.
     #[serde(default)]
     pub self_entry_seeded: bool,
-}
-
-impl Default for AppData {
-    fn default() -> Self {
-        Self {
-            apps: Vec::new(),
-            settings: Settings {
-                github_token: None,
-                gitlab_token: None,
-            },
-            self_entry_seeded: false,
-        }
-    }
 }
