@@ -267,8 +267,8 @@ impl GitHubAdapter {
                     .iter()
                     .any(|marker| has_name_marker(&name, marker));
                 let unsupported_cpu = [
-                    "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786",
-                    "x86_32", "x86-32", "powerpc", "ppc64", "riscv64",
+                    "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786", "x86_32",
+                    "x86-32", "powerpc", "ppc64", "riscv64",
                 ]
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
