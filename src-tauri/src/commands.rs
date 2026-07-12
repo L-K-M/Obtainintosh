@@ -175,24 +175,12 @@ pub async fn update_app(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<App, String> {
-    let app = state
-        .storage
-        .get_app(&id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "App not found".to_string())?;
-
-    let installed = if app.name != name {
-        let detection_name = name.clone();
-        Some(
-            tokio::task::spawn_blocking(move || {
-                crate::installer::detect_installed_app(&detection_name)
-            })
-            .await
-            .map_err(|error| format!("Installed-app detection failed: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let detection_name = name.clone();
+    let installed = tokio::task::spawn_blocking(move || {
+        crate::installer::detect_installed_app(&detection_name)
+    })
+    .await
+    .map_err(|error| format!("Installed-app detection failed: {error}"))?;
 
     // Detection yields to other commands, so edit the latest stored record
     // rather than overwriting a check result with the earlier snapshot.
@@ -225,8 +213,23 @@ pub async fn update_app(
     }
     app.source_url = source_url;
 
-    if app.name != name {
-        match installed.expect("renaming an app must run installed-app detection") {
+    apply_requested_name(&mut app, name, installed);
+
+    state
+        .storage
+        .update_app(app.clone())
+        .map_err(|e| e.to_string())?;
+
+    Ok(app)
+}
+
+fn apply_requested_name(
+    app: &mut App,
+    requested_name: String,
+    installed: Option<(String, String)>,
+) {
+    if app.name != requested_name {
+        match installed {
             Some((path, version)) => {
                 app.current_version = Some(version);
                 app.install_path = Some(path);
@@ -237,14 +240,7 @@ pub async fn update_app(
             }
         }
     }
-    app.name = name;
-
-    state
-        .storage
-        .update_app(app.clone())
-        .map_err(|e| e.to_string())?;
-
-    Ok(app)
+    app.name = requested_name;
 }
 
 #[tauri::command]
@@ -872,6 +868,37 @@ fn reveal_in_finder(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn requested_name_detection_survives_an_interleaved_rename() {
+        let mut latest = App {
+            id: "app-1".to_string(),
+            name: "Concurrent Rename".to_string(),
+            source_type: SourceType::GitHub,
+            source_url: "https://github.com/example/app".to_string(),
+            current_version: Some("old-version".to_string()),
+            latest_version: None,
+            install_path: Some("/Applications/Old.app".to_string()),
+            last_checked: None,
+            last_check_attempt: None,
+        };
+
+        apply_requested_name(
+            &mut latest,
+            "Requested Name".to_string(),
+            Some((
+                "/Applications/Requested Name.app".to_string(),
+                "2.0.0".to_string(),
+            )),
+        );
+
+        assert_eq!(latest.name, "Requested Name");
+        assert_eq!(latest.current_version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            latest.install_path.as_deref(),
+            Some("/Applications/Requested Name.app")
+        );
+    }
 
     #[test]
     fn download_paths_are_unique_and_keep_asset_names_inside_the_operation_directory() {
