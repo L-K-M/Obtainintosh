@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 /**
  * Lightweight in-app update check. Asks the Rust `check_for_update` command (which
@@ -49,10 +50,10 @@ export function skipVersion(version: string): void {
   localStorage.setItem(SKIP_KEY, version);
 }
 
-/** Open the release page in the user's default browser (via the bundled Rust command). */
+/** Open the release page in the user's default browser. */
 export async function openReleasePage(url: string): Promise<void> {
   try {
-    await invoke('open_release_url', { url });
+    await openUrl(url);
   } catch (error) {
     console.warn('Failed to open release page:', error);
   }
