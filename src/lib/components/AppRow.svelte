@@ -31,30 +31,36 @@
     }
 </script>
 
-<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <tr class:has-update={hasUpdate}>
-    <td class="col-name clickable" on:dblclick={() => { if(onopenurl) onopenurl(app.source_url); }}>
-        <BalloonHelp message="Double-click to open the GitHub page">
-            <div class="name-cell">
-                {#if iconUrl}
-                    <img
-                        src={iconUrl}
-                        alt=""
-                        class="app-icon-img"
-                        on:error={(e) => {
-                            const img = e.target;
-                            if (img instanceof HTMLImageElement) {
-                                img.style.display = 'none';
-                                img.nextElementSibling?.classList.remove('hidden');
-                            }
-                        }}
-                    />
-                    <span class="app-icon fallback-icon hidden">📄</span>
-                {:else}
-                    <span class="app-icon">📄</span>
-                {/if}
-                <span class="app-name">{app.name}</span>
-            </div>
+    <td class="col-name">
+        <BalloonHelp message="Open repository">
+            <button
+                type="button"
+                class="repository-link"
+                aria-label={`Open ${app.name} repository`}
+                on:click={() => onopenurl?.(app.source_url)}
+            >
+                <span class="name-cell">
+                    {#if iconUrl}
+                        <img
+                            src={iconUrl}
+                            alt=""
+                            class="app-icon-img"
+                            on:error={(e) => {
+                                const img = e.target;
+                                if (img instanceof HTMLImageElement) {
+                                    img.style.display = 'none';
+                                    img.nextElementSibling?.classList.remove('hidden');
+                                }
+                            }}
+                        />
+                        <span class="app-icon fallback-icon hidden">📄</span>
+                    {:else}
+                        <span class="app-icon">📄</span>
+                    {/if}
+                    <span class="app-name">{app.name}</span>
+                </span>
+            </button>
         </BalloonHelp>
     </td>
     <td class="col-version">
@@ -125,6 +131,29 @@
         width: 35%;
     }
 
+    .col-name :global(.balloon-container) {
+        display: flex;
+        width: 100%;
+        min-width: 0;
+    }
+
+    .repository-link {
+        width: 100%;
+        min-width: 0;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+    }
+
+    .repository-link:focus-visible {
+        outline: 1px dotted #000;
+        outline-offset: -1px;
+    }
+
     .col-version {
         width: 15%;
     }
@@ -142,6 +171,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
+        min-width: 0;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -150,6 +180,9 @@
 
     .name-cell span.app-name {
         padding: 2px 4px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .action-buttons {
@@ -191,10 +224,6 @@
         height: 16px;
         margin-right: 4px;
         vertical-align: middle;
-    }
-
-    .clickable {
-        cursor: pointer;
     }
 
     /* Row Hover Styles */
