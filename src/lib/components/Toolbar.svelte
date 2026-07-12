@@ -42,4 +42,16 @@
         gap: 8px;
         padding: 0 10px;
     }
+
+    @media (max-width: 560px) {
+        .toolbar {
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .toolbar-group {
+            flex-wrap: wrap;
+            padding: 0;
+        }
+    }
 </style>

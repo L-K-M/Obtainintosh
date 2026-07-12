@@ -15,6 +15,8 @@
         "title": "Obtainintosh",
         "width": 800,
         "height": 600,
+        "minWidth": 640,
+        "minHeight": 480,
         "decorations": false,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"
