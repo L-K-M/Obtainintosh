@@ -1,6 +1,7 @@
 <script lang="ts">
   import { TauriService } from '$lib/tauri';
   import type { App } from '$lib/types';
+  import { getErrorMessage } from '$lib/util/errors';
   import { Button, MovableDialog, TextInput } from '@lkmc/system7-ui';
   
 
@@ -75,7 +76,7 @@
         if (onadd) await onadd({ url: url.trim(), name: name.trim() });
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to save program';
+      error = getErrorMessage(e, 'Failed to save program');
     } finally {
       loading = false;
     }

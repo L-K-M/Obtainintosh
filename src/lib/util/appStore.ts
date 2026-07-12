@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import type { App } from '$lib/types';
 import { TauriService } from '$lib/tauri';
+import { getErrorMessage } from '$lib/util/errors';
 import { notifications } from './notifications';
 
 function createAppStore() {
@@ -22,7 +23,7 @@ function createAppStore() {
                 const apps = await TauriService.getAllApps();
                 update(s => ({ ...s, apps, loading: false }));
             } catch (e) {
-                const error = e instanceof Error ? e.message : 'Failed to load apps';
+                const error = getErrorMessage(e, 'Failed to load apps');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
             }
@@ -37,7 +38,7 @@ function createAppStore() {
                 notifications.add(`App "${name}" added successfully`, 'success');
                 return true;
             } catch (e) {
-                const error = e instanceof Error ? e.message : 'Failed to add program';
+                const error = getErrorMessage(e, 'Failed to add program');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
                 return false;
@@ -53,7 +54,7 @@ function createAppStore() {
                 notifications.add(name ? `"${name}" removed` : 'App removed successfully', 'success');
                 return true;
             } catch (e) {
-                const error = e instanceof Error ? e.message : 'Failed to remove app';
+                const error = getErrorMessage(e, 'Failed to remove app');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
                 return false;
@@ -71,7 +72,7 @@ function createAppStore() {
                     notifications.add('Update check completed', 'success');
                 }
             } catch (e) {
-                const error = e instanceof Error ? e.message : 'Failed to check updates';
+                const error = getErrorMessage(e, 'Failed to check updates');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
             }
@@ -86,7 +87,7 @@ function createAppStore() {
                 const apps = await TauriService.getAllApps();
                 update(s => ({ ...s, apps, loading: false }));
             } catch (e) {
-                const error = e instanceof Error ? e.message : 'Failed to install app';
+                const error = getErrorMessage(e, 'Failed to install app');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
             }
