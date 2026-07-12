@@ -41,10 +41,7 @@
   /* Matches @lkmc/system7-ui's Notification chrome: paper fill, ink border, hard
      drop shadow, and its design tokens — so it reads as a System 7 alert. */
   .update-notice {
-    position: fixed;
-    right: 20px;
-    bottom: 20px;
-    z-index: var(--system7-z-notification, 1000);
+    position: relative;
     width: 300px;
     max-width: calc(100vw - 40px);
     padding: 14px 16px 12px;
