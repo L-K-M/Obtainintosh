@@ -15,16 +15,21 @@ use tauri::{
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize storage
-    let storage = storage::Storage::new().expect("Failed to initialize storage");
-    let app_state = AppState {
-        storage: Arc::new(storage),
-    };
-
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
-        .manage(app_state)
         .setup(|app| {
+            let storage = storage::Storage::new().expect("Failed to initialize storage");
+            app.manage(AppState {
+                storage: Arc::new(storage),
+            });
+
             // Create custom menu items
             let add_app =
                 MenuItem::with_id(app, "add_app", "Add App...", true, Some("CmdOrCtrl+N"))?;
