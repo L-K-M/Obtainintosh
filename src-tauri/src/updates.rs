@@ -74,10 +74,9 @@ pub struct UpdateInfo {
 pub async fn check_self_update() -> Result<Option<UpdateInfo>, String> {
     let endpoint = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/latest");
 
+    // The shared client already carries the User-Agent GitHub requires.
     let response = crate::sources::http_client()
         .get(endpoint)
-        // GitHub's API requires a User-Agent.
-        .header("User-Agent", crate::sources::USER_AGENT)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()

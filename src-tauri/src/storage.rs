@@ -9,11 +9,13 @@ pub struct Storage {
     data: Mutex<AppData>,
 }
 
-/// Obtainintosh tracks itself by default: put the app's own entry at the top of
-/// fresh (or pre-seeding) data files. Runs once per data file — after the
-/// `self_entry_seeded` marker is set, removing the entry sticks. An existing
-/// entry for the same repository (added by hand) is left alone. Returns whether
-/// `data` changed and needs saving.
+/// Obtainintosh tracks itself by default: put the app's own entry at the top
+/// of any data file that hasn't been seeded yet. That is deliberately not just
+/// fresh installs — a data file from a pre-self-tracking version gets the
+/// entry once, on the first launch after upgrading. Runs once per data file:
+/// after the `self_entry_seeded` marker is set, removing the entry sticks. An
+/// existing entry for the same repository (added by hand) is left alone.
+/// Returns whether `data` changed and needs saving.
 fn seed_self_entry(data: &mut AppData) -> bool {
     if data.self_entry_seeded {
         return false;

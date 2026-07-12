@@ -66,6 +66,9 @@ jobs:
             case "$RELEASE_TAG" in
               *-*) prerelease=true ;; # mirrors the previous `tag.includes('-')`
             esac
+            # -F/--field (not -f/--raw-field) for draft/prerelease/notes:
+            # gh coerces "true"/"false" into JSON booleans; --raw-field would
+            # send the string "true" and the API would reject it.
             release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
               --method POST \
               --raw-field tag_name="$RELEASE_TAG" \
@@ -152,6 +155,9 @@ jobs:
             fi
           done
 
+      # tauri-action deletes a same-name asset before uploading its own, so
+      # re-dispatching into a release that already has assets from a partial
+      # earlier run is safe — uploads replace rather than 422 on duplicates.
       - name: Build and upload Tauri bundles
         uses: tauri-apps/tauri-action@v0
         env:

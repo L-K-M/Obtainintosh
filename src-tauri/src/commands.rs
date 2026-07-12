@@ -320,15 +320,16 @@ async fn download_file(
     let file_path = cache_dir.join(filename);
     log::debug!("File path: {:?}", file_path);
 
-    // Connect timeout only: a total request timeout would abort large,
-    // slow downloads that are progressing fine.
+    // Deliberately not sources::http_client(): its total request timeout
+    // would abort large, slow downloads that are progressing fine, so this
+    // client has a connect timeout only.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
+        .user_agent(crate::sources::USER_AGENT)
         .build()
         .context("Failed to build HTTP client")?;
     let mut response = client
         .get(url)
-        .header("User-Agent", crate::sources::USER_AGENT)
         .send()
         .await
         .context("Failed to start download")?;

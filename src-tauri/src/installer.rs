@@ -103,3 +103,17 @@ fn get_app_version(app_path: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::detect_running_bundle;
+
+    /// `check_for_updates` relies on the dev-build path: outside a .app bundle
+    /// the running-bundle probe yields None and the compiled-in version is
+    /// used. The test binary lives under target/, not inside a bundle, so this
+    /// locks that behavior in (assuming no ancestor directory is named *.app).
+    #[test]
+    fn running_bundle_is_none_outside_a_bundle() {
+        assert!(detect_running_bundle().is_none());
+    }
+}

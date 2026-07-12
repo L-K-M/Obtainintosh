@@ -15,13 +15,15 @@ pub(crate) fn normalize_repo_url(url: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Shared HTTP client for API calls: connection reuse plus a request timeout
-/// so a hung connection can't leave the UI stuck in "Checking..." forever.
+/// Shared HTTP client for API calls: connection reuse, a request timeout so a
+/// hung connection can't leave the UI stuck in "Checking..." forever, and the
+/// default User-Agent GitHub requires — set here once so every caller gets it.
 pub fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .user_agent(USER_AGENT)
             .build()
             .expect("failed to build HTTP client")
     })
@@ -55,7 +57,6 @@ impl GitHubAdapter {
     fn get(&self, url: &str) -> reqwest::RequestBuilder {
         let mut request = http_client()
             .get(url)
-            .header("User-Agent", USER_AGENT)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
 
