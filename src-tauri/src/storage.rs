@@ -29,6 +29,10 @@ fn seed_self_entry(data: &mut AppData) -> bool {
 }
 
 impl Storage {
+    /// Loads (or initializes) the data file. Note the write side effect: the
+    /// one-time self-entry seeding persists to apps.json, so constructing a
+    /// Storage can mutate the real data file — anything building a Storage
+    /// against a user's environment (tests, fixtures) inherits that.
     pub fn new() -> Result<Self> {
         let app_support = dirs::home_dir()
             .context("Failed to get home directory")?

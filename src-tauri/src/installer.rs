@@ -122,6 +122,12 @@ mod tests {
             )),
             Some(Path::new("/Applications/Obtainintosh.app"))
         );
+        // ancestors() starts at the path itself, so the bundle root resolves
+        // to itself.
+        assert_eq!(
+            enclosing_bundle(Path::new("/Applications/Obtainintosh.app")),
+            Some(Path::new("/Applications/Obtainintosh.app"))
+        );
         // Helper binaries nested deeper inside the bundle still resolve.
         assert_eq!(
             enclosing_bundle(Path::new(

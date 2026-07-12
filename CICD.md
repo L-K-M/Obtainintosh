@@ -90,7 +90,10 @@ want for fixing a broken release run.
 
 Re-dispatching a tag whose release is already published temporarily flips the
 release back to draft while the bundles rebuild, then re-publishes it — so
-nobody downloads from a half-replaced asset list mid-run.
+nobody downloads from a half-replaced asset list mid-run. If that rebuild
+fails, the release stays hidden as a draft (a loud state — the run is red and
+the release page is gone) until a later dispatch succeeds: the next run finds
+the draft, rebuilds its assets, and re-publishes it.
 
 Dispatching a release requires write access to the repository — the same trust
 boundary as pushing a `v*.*.*` tag, so the manual path does not widen who can

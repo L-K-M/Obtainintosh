@@ -39,12 +39,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Only accept tags shaped like the push trigger (v*.*.*). RELEASE_TAG
-          # reaches this script as a real environment variable (the env:
-          # indirection above), so shell expansion treats it as data — this
-          # check is defense-in-depth and a clearer error for malformed
-          # dispatch inputs, not the injection barrier itself.
-          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          # Only accept tags shaped like the push trigger (v*.*.*), ending
+          # either at the patch digit or in a -prerelease suffix — the same
+          # dash the prerelease check below keys on. RELEASE_TAG reaches this
+          # script as a real environment variable (the env: indirection
+          # above), so shell expansion treats it as data — this check is
+          # defense-in-depth and a clearer error for malformed dispatch
+          # inputs, not the injection barrier itself.
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+($|-) ]]; then
             echo "::error::Tag '${RELEASE_TAG}' does not match the release tag format v<major>.<minor>.<patch>"
             exit 1
           fi
