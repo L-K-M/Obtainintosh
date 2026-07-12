@@ -9,16 +9,29 @@
     export let onclose: (() => void) | undefined = undefined;
 
     let settings: Settings = {github_token: null, gitlab_token: null};
+    let initialLoading = true;
     let loading = false;
     let error: string | null = null;
     let success = false;
+    let destroyed = false;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
-    onMount(async () => {
-        try {
-            settings = await TauriService.getSettings();
-        } catch (e) {
-            error = getErrorMessage(e, 'Failed to load settings');
-        }
+    onMount(() => {
+        void (async () => {
+            try {
+                const loadedSettings = await TauriService.getSettings();
+                if (!destroyed) settings = loadedSettings;
+            } catch (e) {
+                if (!destroyed) error = getErrorMessage(e, 'Failed to load settings');
+            } finally {
+                if (!destroyed) initialLoading = false;
+            }
+        })();
+
+        return () => {
+            destroyed = true;
+            if (closeTimer !== undefined) clearTimeout(closeTimer);
+        };
     });
 
     function close() {
@@ -27,32 +40,35 @@
 
     async function handleSave(event: Event) {
         event.preventDefault();
+        if (initialLoading || loading) return;
 
         try {
             loading = true;
             error = null;
             success = false;
             await TauriService.updateSettings(settings);
+            if (destroyed) return;
             success = true;
-            setTimeout(() => {
+            closeTimer = setTimeout(() => {
                 close();
             }, 1000);
         } catch (e) {
-            error = getErrorMessage(e, 'Failed to save settings');
+            if (!destroyed) error = getErrorMessage(e, 'Failed to save settings');
         } finally {
-            loading = false;
+            if (!destroyed) loading = false;
         }
     }
 </script>
 
 <MovableDialog title="Settings" onclose={close}>
-    <form on:submit={handleSave}>
+    <form on:submit={handleSave} aria-busy={initialLoading || loading}>
         <div class="s7-form-group">
             <label for="github-token">GitHub Personal Access Token</label>
             <TextInput
                     id="github-token"
                     type="password"
                     clearable
+                    disabled={initialLoading || loading}
                     placeholder="ghp_xxxxxxxxxxxx (optional)"
                     value={settings.github_token ?? ''}
                     oninput={(value) => (settings.github_token = value || null)}
@@ -92,7 +108,7 @@
             <Button type="button" onclick={close} disabled={loading}>
                 Cancel
             </Button>
-            <Button type="submit" variant="primary" disabled={loading}>
+            <Button type="submit" variant="primary" disabled={initialLoading || loading}>
                 Save
             </Button>
         </div>
