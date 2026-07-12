@@ -40,11 +40,10 @@ pub(crate) fn self_app_entry() -> App {
 
 /// Whether a tracked app is Obtainintosh itself — the seeded self-entry, or the
 /// same repository added by hand (matched like `Storage::add_app`'s dedupe:
-/// case-insensitively, ignoring a trailing slash).
+/// case-insensitively, ignoring a trailing slash or `.git`).
 pub(crate) fn is_self_app(app: &App) -> bool {
-    app.source_url
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(&self_repo_url())
+    crate::sources::normalize_repo_url(&app.source_url)
+        == crate::sources::normalize_repo_url(&self_repo_url())
 }
 
 #[derive(Deserialize)]

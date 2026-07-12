@@ -4,6 +4,17 @@ use serde::Deserialize;
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
+/// Canonical form for "is this the same repository?" comparisons: lowercased,
+/// ignoring a trailing slash and a trailing `.git`. Shared by
+/// `Storage::add_app`'s dedupe and `updates::is_self_app` so the two checks
+/// can't drift apart.
+pub(crate) fn normalize_repo_url(url: &str) -> String {
+    url.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
 /// Shared HTTP client for API calls: connection reuse plus a request timeout
 /// so a hung connection can't leave the UI stuck in "Checking..." forever.
 pub fn http_client() -> &'static reqwest::Client {
@@ -277,6 +288,23 @@ mod tests {
             GitHubAdapter::parse_github_url("github.com/owner/repo").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
+    }
+
+    #[test]
+    fn test_normalize_repo_url() {
+        for url in [
+            "https://github.com/Owner/Repo",
+            "https://GitHub.com/owner/repo/",
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo.git/",
+        ] {
+            assert_eq!(
+                super::normalize_repo_url(url),
+                "https://github.com/owner/repo",
+                "normalizing {}",
+                url
+            );
+        }
     }
 
     #[test]

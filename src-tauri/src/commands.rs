@@ -121,11 +121,17 @@ pub async fn check_for_updates(
                 app.install_path = Some(path);
             }
             // Obtainintosh itself is running right now, so it always has a
-            // current version — even without an /Applications install (dev
-            // builds, custom install locations).
+            // current version — even without an /Applications install. Prefer
+            // the bundle the process runs from (stays accurate if that bundle
+            // is replaced on disk by an update); the compiled-in version is
+            // the fallback for dev builds outside a bundle.
             None if crate::updates::is_self_app(&app) => {
-                app.current_version = Some(env!("CARGO_PKG_VERSION").to_string());
-                app.install_path = None;
+                let (path, version) = match crate::installer::detect_running_bundle() {
+                    Some((path, version)) => (Some(path), version),
+                    None => (None, env!("CARGO_PKG_VERSION").to_string()),
+                };
+                app.current_version = Some(version);
+                app.install_path = path;
             }
             None => {
                 app.current_version = None;

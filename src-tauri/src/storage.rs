@@ -54,7 +54,9 @@ impl Storage {
             data: Mutex::new(data),
         };
         if seeded {
-            storage.save()?;
+            storage
+                .save()
+                .context("Failed to save the seeded self-entry")?;
         }
         Ok(storage)
     }
@@ -87,12 +89,13 @@ impl Storage {
             app.id = uuid::Uuid::new_v4().to_string();
         }
 
+        let new_url = crate::sources::normalize_repo_url(&app.source_url);
         let mut data = self.data.lock().unwrap();
-        if data.apps.iter().any(|a| {
-            a.source_url
-                .trim_end_matches('/')
-                .eq_ignore_ascii_case(app.source_url.trim_end_matches('/'))
-        }) {
+        if data
+            .apps
+            .iter()
+            .any(|a| crate::sources::normalize_repo_url(&a.source_url) == new_url)
+        {
             anyhow::bail!("This repository is already being tracked");
         }
         data.apps.push(app.clone());
@@ -163,22 +166,30 @@ mod tests {
 
     #[test]
     fn does_not_duplicate_a_manually_added_self_entry() {
-        let mut data = AppData::default();
-        data.apps.push(App {
-            id: "existing".to_string(),
-            name: "Obtainintosh (mine)".to_string(),
-            source_type: SourceType::GitHub,
-            // Same repo, different spelling: dedupe is case-insensitive and
-            // ignores a trailing slash, like Storage::add_app.
-            source_url: "https://GitHub.com/l-k-m/obtainintosh/".to_string(),
-            current_version: None,
-            latest_version: None,
-            install_path: None,
-            last_checked: None,
-        });
-        assert!(seed_self_entry(&mut data)); // still marks the file as seeded
-        assert_eq!(data.apps.len(), 1);
-        assert_eq!(data.apps[0].id, "existing");
-        assert!(data.self_entry_seeded);
+        // Same repo, different spellings: matching is case-insensitive and
+        // ignores a trailing slash or `.git`, like Storage::add_app's dedupe.
+        // Derived from self_repo_url() so these keep exercising the match
+        // paths if OWNER/REPO ever change.
+        let variants = [
+            format!("{}/", crate::updates::self_repo_url().to_uppercase()),
+            format!("{}.git", crate::updates::self_repo_url()),
+        ];
+        for source_url in variants {
+            let mut data = AppData::default();
+            data.apps.push(App {
+                id: "existing".to_string(),
+                name: "Obtainintosh (mine)".to_string(),
+                source_type: SourceType::GitHub,
+                source_url: source_url.clone(),
+                current_version: None,
+                latest_version: None,
+                install_path: None,
+                last_checked: None,
+            });
+            assert!(seed_self_entry(&mut data)); // still marks the file as seeded
+            assert_eq!(data.apps.len(), 1, "duplicated for {}", source_url);
+            assert_eq!(data.apps[0].id, "existing");
+            assert!(data.self_entry_seeded);
+        }
     }
 }

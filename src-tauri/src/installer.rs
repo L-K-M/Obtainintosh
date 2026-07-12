@@ -48,6 +48,22 @@ pub fn detect_installed_app(app_name: &str) -> Option<(String, String)> {
     None
 }
 
+/// Locate the .app bundle the current process runs from — the executable lives
+/// at `<Name>.app/Contents/MacOS/<bin>` — and read its version, like
+/// `detect_installed_app`. Reading from disk (rather than the compiled-in
+/// version) stays truthful when the bundle is replaced by an update while the
+/// old binary keeps running. Dev builds run outside a bundle and return None.
+pub fn detect_running_bundle() -> Option<(String, String)> {
+    let exe = std::env::current_exe().ok()?;
+    let app_dir = exe.parent()?.parent()?.parent()?; // MacOS/ -> Contents/ -> .app
+    if app_dir.extension().and_then(|s| s.to_str()) != Some("app") {
+        return None;
+    }
+    let app_path = app_dir.to_str()?.to_string();
+    let version = get_app_version(&app_path)?;
+    Some((app_path, version))
+}
+
 /// Get version from an installed .app bundle
 fn get_app_version(app_path: &str) -> Option<String> {
     let plist_path = format!("{}/Contents/Info.plist", app_path);
