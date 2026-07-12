@@ -149,6 +149,7 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
+          workspaces: src-tauri
           key: ${{ matrix.platform }}-${{ matrix.args }}
 
       - name: Install frontend dependencies

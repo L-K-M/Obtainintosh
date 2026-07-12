@@ -16,7 +16,6 @@ vite.config.ts.timestamp-*
 
 # Rust / Tauri
 src-tauri/target/
-src-tauri/Cargo.lock
 target/
 
 # macOS
