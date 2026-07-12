@@ -289,6 +289,7 @@
         /* Height must be explicit here for the main window */
         width: 100vw;
         height: 100vh;
+        box-sizing: border-box;
         background: #fff;
         border: 1px solid #000;
         box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.2);
@@ -309,5 +310,13 @@
         background: #fff;
         overflow: hidden;
         min-height: 0; /* Critical for nested flex scrolling */
+    }
+
+    .window-frame :global(.s7-dialog) {
+        max-width: calc(100vw - 34px);
+    }
+
+    .window-frame :global(.s7-fixed-dialog) {
+        max-width: calc(100vw - 96px);
     }
 </style>

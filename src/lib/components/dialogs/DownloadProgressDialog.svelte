@@ -44,7 +44,8 @@
         display: flex;
         align-items: flex-start;
         justify-content: center;
-        padding-top: 90px;
+        padding: 90px 16px 16px;
+        box-sizing: border-box;
         z-index: 1000;
         pointer-events: none;
     }
@@ -56,7 +57,8 @@
         outline: 1px solid #fff;
         box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.5);
         padding: 14px 18px 12px;
-        min-width: 340px;
+        box-sizing: border-box;
+        width: 100%;
         max-width: 460px;
     }
 

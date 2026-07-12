@@ -173,10 +173,13 @@
         flex: 1;
         min-height: 0;
         display: flex;
+        overflow-x: auto;
+        overflow-y: hidden;
     }
 
     .app-table :global(.data-view) {
         background: #fff;
+        min-width: 600px;
         width: 100%;
     }
 
