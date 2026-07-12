@@ -27,14 +27,12 @@
     import { notifications } from '$lib/util/notifications';
     import { TauriService } from '$lib/tauri';
 
-    let showAddDialog = false;
-    let showSettings = false;
-    let editingApp: App | null = null;
+    type AddModal = {type: 'add'; app: App | null};
+    type ConfirmRemoveModal = {type: 'confirm-remove'; appId: string; appName: string};
+    type ModalState = AddModal | {type: 'settings'} | ConfirmRemoveModal | {type: 'about'} | null;
+
+    let activeModal: ModalState = null;
     let isWindowShaded = false;
-    let clickedApplicationName = '';
-    let showConfirm = false;
-    let confirmAppId: string | null = null;
-    let showAboutDialog = false;
     let systemColors: SystemColors | null = null;
 
     interface DownloadProgress {
@@ -67,8 +65,7 @@
         });
 
         const unlistenAddApp = appWindow.listen('menu-add-app', () => {
-            editingApp = null;
-            showAddDialog = true;
+            activeModal = {type: 'add', app: null};
         });
 
         const unlistenCheckAll = appWindow.listen('menu-check-all', () => {
@@ -76,11 +73,11 @@
         });
 
         const unlistenSettings = appWindow.listen('menu-settings', () => {
-            showSettings = true;
+            activeModal = {type: 'settings'};
         });
 
         const unlistenAbout = appWindow.listen('menu-about', () => {
-            showAboutDialog = true;
+            activeModal = {type: 'about'};
         });
 
         // Cleanup on unmount
@@ -102,45 +99,44 @@
         }
     }
 
-    async function handleAddApp(url: string, name: string) {
+    function closeModal(modal: Exclude<ModalState, null>) {
+        if (activeModal === modal) activeModal = null;
+    }
+
+    async function handleAddApp(modal: AddModal, url: string, name: string) {
         const success = await appStore.addApp(url, name);
-        if (success) {
-            showAddDialog = false;
-            editingApp = null;
-        }
+        if (success) closeModal(modal);
     }
 
     function handleEdit(app: App) {
-        editingApp = app;
-        showAddDialog = true;
+        activeModal = {type: 'add', app};
     }
 
-    async function handleUpdateApp() {
+    async function handleUpdateApp(modal: AddModal) {
         // Dialog handles the actual API call, we just need to refresh
-        showAddDialog = false;
-        editingApp = null;
+        closeModal(modal);
         await appStore.loadApps();
     }
 
     async function handleRemove(id: string) {
-        confirmAppId = id;
-        clickedApplicationName = apps.find(a => a.id === id)?.name || '';
-        showConfirm = true;
+        activeModal = {
+            type: 'confirm-remove',
+            appId: id,
+            appName: apps.find(a => a.id === id)?.name || ''
+        };
     }
 
-    async function confirmRemove() {
-        if (!confirmAppId) return;
+    async function confirmRemove(modal: ConfirmRemoveModal) {
+        if (!modal.appId) return;
 
         // Close the dialog regardless of outcome; the store surfaces errors
         // via notifications.
-        await appStore.removeApp(confirmAppId, clickedApplicationName);
-        showConfirm = false;
-        confirmAppId = null;
+        await appStore.removeApp(modal.appId, modal.appName);
+        closeModal(modal);
     }
 
-    function cancelRemove() {
-        showConfirm = false;
-        confirmAppId = null;
+    function cancelRemove(modal: ConfirmRemoveModal) {
+        closeModal(modal);
     }
 
 
@@ -224,9 +220,9 @@
         <main class="app-content">
             <Toolbar
                 {loading}
-                onaddApp={() => { editingApp = null; showAddDialog = true; }}
+                onaddApp={() => activeModal = {type: 'add', app: null}}
                 oncheckAll={() => appStore.checkForUpdates()}
-                onsettings={() => showSettings = true}
+                onsettings={() => activeModal = {type: 'settings'}}
             />
 
             {#if error}
@@ -246,30 +242,28 @@
 
     <!-- Dialogs live inside the .s7-root frame so they inherit the System 7
          font scope and the OS accent variables applied to the frame. -->
-    {#if showAddDialog}
+    {#if activeModal?.type === 'add'}
+        {@const modal = activeModal}
         <AddAppDialog
-                app={editingApp}
-                onclose={() => { showAddDialog = false; editingApp = null; }}
-                onadd={(e) => handleAddApp(e.url, e.name)}
-                onupdate={handleUpdateApp}
+                app={modal.app}
+                onclose={() => closeModal(modal)}
+                onadd={(e) => handleAddApp(modal, e.url, e.name)}
+                onupdate={() => handleUpdateApp(modal)}
         />
-    {/if}
-
-    {#if showSettings}
-        <SettingsPanel onclose={() => showSettings = false}/>
-    {/if}
-
-    {#if showConfirm}
+    {:else if activeModal?.type === 'settings'}
+        {@const modal = activeModal}
+        <SettingsPanel onclose={() => closeModal(modal)}/>
+    {:else if activeModal?.type === 'confirm-remove'}
+        {@const modal = activeModal}
         <ConfirmDialog
-            message="Are you sure you want to remove {clickedApplicationName}?"
+            message="Are you sure you want to remove {modal.appName}?"
             okText="Remove"
-            onconfirm={confirmRemove}
-            oncancel={cancelRemove}
+            onconfirm={() => confirmRemove(modal)}
+            oncancel={() => cancelRemove(modal)}
         />
-    {/if}
-
-    {#if showAboutDialog}
-        <AboutDialog onClose={() => showAboutDialog = false} />
+    {:else if activeModal?.type === 'about'}
+        {@const modal = activeModal}
+        <AboutDialog onClose={() => closeModal(modal)} />
     {/if}
 
     {#if downloadProgress}
