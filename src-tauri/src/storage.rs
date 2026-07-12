@@ -283,7 +283,11 @@ impl Storage {
         let Some(index) = data.apps.iter().position(|app| app.id == snapshot.id) else {
             return Ok(PendingResultApplication::AppRemoved);
         };
-        if !same_source_identity(&data.apps[index], snapshot) {
+        let current = &data.apps[index];
+        if !same_source_identity(current, snapshot)
+            || current.latest_version != snapshot.latest_version
+            || current.last_checked != snapshot.last_checked
+        {
             return Ok(PendingResultApplication::DependenciesChanged);
         }
 
@@ -945,6 +949,51 @@ mod tests {
         assert_eq!(current.latest_version, None);
         assert_eq!(current.last_checked, None);
         assert_eq!(current.last_check_attempt, None);
+    }
+
+    #[test]
+    fn older_download_cannot_regress_a_newer_successful_check() {
+        let (storage, _temp_dir) = test_storage();
+        let mut tracked = app(
+            "download",
+            SourceType::GitHub,
+            "https://github.com/owner/download",
+        );
+        tracked.latest_version = Some("1.0.0".to_string());
+        tracked.last_checked = Some("v1-check".to_string());
+        tracked.last_check_attempt = Some(CheckAttempt::succeeded("v1-check".to_string()));
+        storage.add_app(tracked).unwrap();
+        let download_snapshot = storage.get_app("download").unwrap().unwrap();
+
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &download_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: None,
+                        install_path: None,
+                        latest_version: Some("2.0.0".to_string()),
+                        attempt: CheckAttempt::succeeded("v2-check".to_string()),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::Applied
+        );
+
+        assert_eq!(
+            storage
+                .apply_download_release(
+                    &download_snapshot,
+                    "1.0.0".to_string(),
+                    "v1-download-finished".to_string(),
+                )
+                .unwrap(),
+            PendingResultApplication::DependenciesChanged
+        );
+        let current = storage.get_app("download").unwrap().unwrap();
+        assert_eq!(current.latest_version.as_deref(), Some("2.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("v2-check"));
+        assert_eq!(current.last_check_attempt.unwrap().attempted_at, "v2-check");
     }
 
     #[test]

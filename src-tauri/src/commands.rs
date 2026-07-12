@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tauri::{Emitter, State};
 use tokio::task::JoinSet;
@@ -31,9 +31,7 @@ impl InFlightDownloadGuard {
         operation: &str,
         active_download: Arc<Mutex<Option<String>>>,
     ) -> Result<Self, String> {
-        let mut active = active_download
-            .lock()
-            .map_err(|_| "Download state is unavailable".to_string())?;
+        let mut active = lock_active_download(&active_download);
         if let Some(active_operation) = active.as_deref() {
             return Err(format!(
                 "A download for {active_operation} is already in progress; wait for it to finish before starting another"
@@ -48,12 +46,18 @@ impl InFlightDownloadGuard {
 
 impl Drop for InFlightDownloadGuard {
     fn drop(&mut self) {
-        let mut active = self
-            .active_download
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut active = lock_active_download(&self.active_download);
         active.take();
     }
+}
+
+fn lock_active_download(active_download: &Mutex<Option<String>>) -> MutexGuard<'_, Option<String>> {
+    active_download.lock().unwrap_or_else(|poisoned| {
+        log::warn!("In-flight download state was poisoned; recovering its last known state");
+        let guard = poisoned.into_inner();
+        active_download.clear_poison();
+        guard
+    })
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -601,7 +605,7 @@ pub async fn download_and_install(
                 .to_string(),
         ),
         Ok(PendingResultApplication::DependenciesChanged) => Some(
-            "The app's source changed while downloading, so the old source's release was not written to its current metadata. The verified file is still available."
+            "The app's source or update metadata changed while downloading, so the older release was not written to its current metadata. The verified file is still available."
                 .to_string(),
         ),
         Err(error) => {
@@ -680,7 +684,7 @@ async fn download_file(
     on_progress(0, Some(expected_size));
 
     let cache_dir = std::env::temp_dir().join("obtainintosh-downloads");
-    std::fs::create_dir_all(&cache_dir).context("Failed to create download directory")?;
+    ensure_private_cache_directory(&cache_dir)?;
     let paths = download_paths(&cache_dir, filename, uuid::Uuid::new_v4())?;
     create_private_directory(&paths.directory)?;
     let mut partial_download = PartialDownload::new(paths);
@@ -715,7 +719,9 @@ async fn download_file(
             .context("Failed to write download file")?;
         downloaded += chunk.len() as u64;
         if downloaded > expected_size {
-            validate_download_size(downloaded, expected_size)?;
+            anyhow::bail!(
+                "Download exceeded the GitHub asset size: received {downloaded} bytes, expected {expected_size} bytes"
+            );
         }
 
         // Throttle progress events to roughly every 256 KB
@@ -784,7 +790,32 @@ fn create_private_directory(path: &Path) -> Result<()> {
     }
     builder
         .create(path)
-        .with_context(|| format!("Failed to create private download directory at {:?}", path))
+        .with_context(|| format!("Failed to create private download directory at {:?}", path))?;
+    set_private_directory_permissions(path)
+}
+
+fn ensure_private_cache_directory(path: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .with_context(|| format!("Failed to create download cache directory at {:?}", path))?;
+    set_private_directory_permissions(path)
+}
+
+fn set_private_directory_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to secure download directory at {:?}", path))?;
+    }
+    Ok(())
 }
 
 struct PartialDownload {
@@ -805,6 +836,7 @@ impl Drop for PartialDownload {
     fn drop(&mut self) {
         if !self.published {
             let _ = std::fs::remove_file(&self.paths.partial);
+            let _ = std::fs::remove_file(&self.paths.completed);
             let _ = std::fs::remove_dir(&self.paths.directory);
         }
     }
@@ -862,6 +894,19 @@ mod tests {
         assert_ne!(first.completed, second.completed);
         assert_eq!(first.completed, first.directory.join("Example.dmg"));
         assert_eq!(first.partial, first.directory.join("Example.dmg.part"));
+    }
+
+    #[test]
+    fn download_paths_collapse_traversal_to_the_asset_file_name() {
+        let paths = download_paths(
+            Path::new("download-tests"),
+            "../../etc/passwd",
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(paths.completed, paths.directory.join("passwd"));
+        assert_eq!(paths.partial, paths.directory.join("passwd.part"));
     }
 
     #[test]
@@ -927,5 +972,99 @@ mod tests {
         assert_eq!(*results[0].as_ref().unwrap(), 0);
         assert!(results[1].as_ref().unwrap_err().is_panic());
         assert_eq!(*results[2].as_ref().unwrap(), 2);
+    }
+
+    #[test]
+    fn poisoned_download_state_is_recovered() {
+        let active_download = Arc::new(Mutex::new(None));
+        let poisoned = Arc::clone(&active_download);
+        assert!(std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison download state for test");
+        })
+        .join()
+        .is_err());
+
+        let guard = InFlightDownloadGuard::acquire("App One (app-1)", Arc::clone(&active_download))
+            .unwrap();
+        assert!(!active_download.is_poisoned());
+        drop(guard);
+        assert!(lock_active_download(&active_download).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_and_operation_directories_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "obtainintosh-permissions-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let cache = root.join("obtainintosh-downloads");
+
+        ensure_private_cache_directory(&cache).unwrap();
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_cache_directory(&cache).unwrap();
+        let operation = cache.join(uuid::Uuid::new_v4().to_string());
+        create_private_directory(&operation).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&operation).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpublished_download_cleanup_removes_every_possible_file() {
+        let root = std::env::temp_dir().join(format!(
+            "obtainintosh-cleanup-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = download_paths(&root, "Example.dmg", uuid::Uuid::new_v4()).unwrap();
+        create_private_directory(&paths.directory).unwrap();
+        std::fs::write(&paths.partial, b"partial").unwrap();
+        std::fs::write(&paths.completed, b"renamed").unwrap();
+
+        let directory = paths.directory.clone();
+        let partial = paths.partial.clone();
+        let completed = paths.completed.clone();
+        drop(PartialDownload::new(paths));
+
+        assert!(!partial.exists());
+        assert!(!completed.exists());
+        assert!(!directory.exists());
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn published_download_cleanup_leaves_completed_file() {
+        let root = std::env::temp_dir().join(format!(
+            "obtainintosh-published-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = download_paths(&root, "Example.dmg", uuid::Uuid::new_v4()).unwrap();
+        create_private_directory(&paths.directory).unwrap();
+        std::fs::write(&paths.completed, b"complete").unwrap();
+
+        let completed = paths.completed.clone();
+        let mut download = PartialDownload::new(paths);
+        download.published = true;
+        drop(download);
+
+        assert!(completed.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
