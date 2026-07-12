@@ -433,7 +433,7 @@ pub async fn download_and_install(
                 .to_string(),
         ),
         Ok(PendingResultApplication::DependenciesChanged) => Some(
-            "The app's source changed while downloading, so the old source's release was not written to its current metadata. The verified file is still available."
+            "The app's source or update metadata changed while downloading, so the older release was not written to its current metadata. The verified file is still available."
                 .to_string(),
         ),
         Err(error) => {
