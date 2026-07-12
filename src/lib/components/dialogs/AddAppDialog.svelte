@@ -18,6 +18,15 @@
   // Tracks the last auto-derived name so we keep updating it as the URL is
   // typed, but stop as soon as the user edits the name themselves.
   let autoFilledName = '';
+  let appIdentity = app?.id ?? null;
+
+  $: if ((app?.id ?? null) !== appIdentity) {
+    appIdentity = app?.id ?? null;
+    url = app?.source_url ?? '';
+    name = app?.name ?? '';
+    autoFilledName = '';
+    error = null;
+  }
 
   $: isEdit = !!app;
 
