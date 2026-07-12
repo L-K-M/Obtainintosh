@@ -21,6 +21,7 @@ set -euo pipefail
 export RELEASE_APP_NAME="Obtainintosh"
 export RELEASE_KIND="tauri"
 export RELEASE_CARGO_TOMLS="src-tauri/Cargo.toml"
+export RELEASE_POST_BUMP='scripts/check-release-version.sh "v${RELEASE_NEW_VERSION}"'
 export RELEASE_CI_NOTE="CI (release.yml) will now build the Tauri bundles and publish the GitHub Release."
 export RELEASE_INVOKED_AS="scripts/release.sh"
 
@@ -29,4 +30,17 @@ command -v "$BIN" >/dev/null 2>&1 || {
   echo "error: lkm-release not found — clone https://github.com/L-K-M/release-tool and run ./install.sh" >&2
   exit 1
 }
+
+# Explicit bumps run the guard through RELEASE_POST_BUMP after all files change.
+# With no version argument, verify the current files before the engine tags them.
+preflight_current=true
+for arg in "$@"; do
+  case "$arg" in
+    --push) ;;
+    *) preflight_current=false ;;
+  esac
+done
+if $preflight_current; then
+  scripts/check-release-version.sh
+fi
 exec "$BIN" "$@"

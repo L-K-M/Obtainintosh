@@ -34,8 +34,12 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
     steps:
-      - name: Create or reuse draft release
-        id: create
+      # Keep the workflow's guard available when re-releasing an older tag that
+      # predates it, then inspect the files from the tagged commit separately.
+      - name: Check out release tooling
+        uses: actions/checkout@v5
+
+      - name: Validate release tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -59,6 +63,20 @@ jobs:
             exit 1
           fi
 
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: release-source
+
+      - name: Verify release versions
+        run: scripts/check-release-version.sh "$RELEASE_TAG" release-source
+
+      - name: Create or reuse draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           # Reuse an existing release for this tag — draft or published — so a
           # re-dispatch after a partial failure continues into the same release
           # instead of creating a duplicate draft (or 422ing on a published
