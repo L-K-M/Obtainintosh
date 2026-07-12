@@ -54,16 +54,16 @@ impl Storage {
             data: Mutex::new(data),
         };
         if seeded {
+            let data = storage.data.lock().unwrap();
             storage
-                .save()
+                .persist(&data)
                 .context("Failed to save the seeded self-entry")?;
         }
         Ok(storage)
     }
 
-    fn save(&self) -> Result<()> {
-        let data = self.data.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*data).context("Failed to serialize data")?;
+    fn persist(&self, data: &AppData) -> Result<()> {
+        let json = serde_json::to_string_pretty(data).context("Failed to serialize data")?;
 
         // Atomic write: write to temp file then rename
         let temp_path = self.file_path.with_extension("json.tmp");
@@ -100,10 +100,11 @@ impl Storage {
         if has_duplicate_github_source(&data.apps, &new_identity, None) {
             anyhow::bail!("This repository is already being tracked");
         }
-        data.apps.push(app.clone());
-        drop(data);
+        let mut proposed = data.clone();
+        proposed.apps.push(app.clone());
 
-        self.save()?;
+        self.persist(&proposed)?;
+        *data = proposed;
         Ok(app)
     }
 
@@ -133,18 +134,22 @@ impl Storage {
             SourceType::GitLab => {}
         }
 
-        data.apps[index] = updated_app;
+        let mut proposed = data.clone();
+        proposed.apps[index] = updated_app;
 
-        drop(data);
-        self.save()
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(())
     }
 
     pub fn remove_app(&self, id: &str) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        data.apps.retain(|app| app.id != id);
-        drop(data);
+        let mut proposed = data.clone();
+        proposed.apps.retain(|app| app.id != id);
 
-        self.save()
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(())
     }
 
     pub fn get_settings(&self) -> Result<Settings> {
@@ -154,10 +159,12 @@ impl Storage {
 
     pub fn update_settings(&self, settings: Settings) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        data.settings = settings;
-        drop(data);
+        let mut proposed = data.clone();
+        proposed.settings = settings;
 
-        self.save()
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(())
     }
 }
 
@@ -174,15 +181,47 @@ fn has_duplicate_github_source(apps: &[App], identity: &str, excluding_id: Optio
 mod tests {
     use super::*;
     use crate::models::{App, SourceType};
+    use std::path::Path;
 
-    fn test_storage() -> Storage {
-        Storage {
-            file_path: std::env::temp_dir().join(format!(
-                "obtainintosh-storage-test-{}.json",
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "obtainintosh-storage-test-{}",
                 uuid::Uuid::new_v4()
-            )),
-            data: Mutex::new(AppData::default()),
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
         }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn test_storage() -> (Storage, TestDir) {
+        let temp_dir = TestDir::new();
+        let storage = Storage {
+            file_path: temp_dir.path().join("apps.json"),
+            data: Mutex::new(AppData::default()),
+        };
+        (storage, temp_dir)
+    }
+
+    fn failing_storage(data: AppData) -> (Storage, TestDir) {
+        let temp_dir = TestDir::new();
+        let storage = Storage {
+            file_path: temp_dir.path().join("missing").join("apps.json"),
+            data: Mutex::new(data),
+        };
+        (storage, temp_dir)
     }
 
     fn app(id: &str, source_type: SourceType, source_url: &str) -> App {
@@ -248,7 +287,7 @@ mod tests {
 
     #[test]
     fn add_rejects_equivalent_github_urls() {
-        let storage = test_storage();
+        let (storage, _temp_dir) = test_storage();
         storage
             .add_app(app(
                 "first",
@@ -272,7 +311,7 @@ mod tests {
 
     #[test]
     fn edit_rejects_a_duplicate_github_identity_atomically() {
-        let storage = test_storage();
+        let (storage, _temp_dir) = test_storage();
         storage
             .add_app(app(
                 "first",
@@ -302,7 +341,7 @@ mod tests {
 
     #[test]
     fn add_rejects_gitlab_but_existing_gitlab_records_remain_editable() {
-        let storage = test_storage();
+        let (storage, _temp_dir) = test_storage();
         let gitlab: App = serde_json::from_value(serde_json::json!({
             "id": "legacy",
             "name": "legacy",
@@ -325,5 +364,77 @@ mod tests {
         let preserved = storage.get_app("legacy").unwrap().unwrap();
         assert_eq!(preserved.source_type, SourceType::GitLab);
         assert_eq!(preserved.name, "Renamed legacy app");
+    }
+
+    #[test]
+    fn failed_add_does_not_change_memory() {
+        let (storage, _temp_dir) = failing_storage(AppData::default());
+
+        let error = storage
+            .add_app(app(
+                "new",
+                SourceType::GitHub,
+                "https://github.com/owner/new",
+            ))
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert!(storage.get_all_apps().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_update_does_not_change_memory() {
+        let mut data = AppData::default();
+        data.apps.push(app(
+            "existing",
+            SourceType::GitHub,
+            "https://github.com/owner/existing",
+        ));
+        let (storage, _temp_dir) = failing_storage(data);
+        let mut updated = storage.get_app("existing").unwrap().unwrap();
+        updated.name = "Changed".to_string();
+
+        let error = storage.update_app(updated).unwrap_err().to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert_eq!(
+            storage.get_app("existing").unwrap().unwrap().name,
+            "existing"
+        );
+    }
+
+    #[test]
+    fn failed_remove_does_not_change_memory() {
+        let mut data = AppData::default();
+        data.apps.push(app(
+            "existing",
+            SourceType::GitHub,
+            "https://github.com/owner/existing",
+        ));
+        let (storage, _temp_dir) = failing_storage(data);
+
+        let error = storage.remove_app("existing").unwrap_err().to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert!(storage.get_app("existing").unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_settings_update_does_not_change_memory() {
+        let mut data = AppData::default();
+        data.settings.github_token = Some("old-token".to_string());
+        let (storage, _temp_dir) = failing_storage(data);
+        let settings = Settings {
+            github_token: Some("new-token".to_string()),
+            gitlab_token: Some("new-gitlab-token".to_string()),
+        };
+
+        let error = storage.update_settings(settings).unwrap_err().to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        let settings = storage.get_settings().unwrap();
+        assert_eq!(settings.github_token.as_deref(), Some("old-token"));
+        assert_eq!(settings.gitlab_token, None);
     }
 }
