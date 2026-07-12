@@ -56,15 +56,20 @@ pub fn detect_running_bundle() -> Option<(String, String)> {
     let exe = std::env::current_exe().ok()?;
     // Resolve symlinks so a linked binary still maps back to its real bundle.
     let exe = exe.canonicalize().unwrap_or(exe);
-    // Walk up instead of assuming the executable sits exactly at
-    // <Name>.app/Contents/MacOS/<bin>, so helper binaries nested deeper
-    // inside the bundle still resolve.
-    let app_dir = exe
-        .ancestors()
-        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("app"))?;
+    let app_dir = enclosing_bundle(&exe)?;
     let app_path = app_dir.to_str()?.to_string();
     let version = get_app_version(&app_path)?;
     Some((app_path, version))
+}
+
+/// Nearest ancestor that is a macOS .app bundle directory. Walks up instead of
+/// assuming the executable sits exactly at `<Name>.app/Contents/MacOS/<bin>`,
+/// so helper binaries nested deeper inside the bundle still resolve. Split out
+/// from `detect_running_bundle` so the walk is testable with controlled paths
+/// rather than depending on where the test binary happens to live.
+fn enclosing_bundle(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("app"))
 }
 
 /// Get version from an installed .app bundle
@@ -106,14 +111,33 @@ fn get_app_version(app_path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_running_bundle;
+    use super::enclosing_bundle;
+    use std::path::Path;
+
+    #[test]
+    fn finds_enclosing_app_bundle() {
+        assert_eq!(
+            enclosing_bundle(Path::new(
+                "/Applications/Obtainintosh.app/Contents/MacOS/obtainintosh"
+            )),
+            Some(Path::new("/Applications/Obtainintosh.app"))
+        );
+        // Helper binaries nested deeper inside the bundle still resolve.
+        assert_eq!(
+            enclosing_bundle(Path::new(
+                "/Applications/Obtainintosh.app/Contents/Frameworks/helper"
+            )),
+            Some(Path::new("/Applications/Obtainintosh.app"))
+        );
+    }
 
     /// `check_for_updates` relies on the dev-build path: outside a .app bundle
-    /// the running-bundle probe yields None and the compiled-in version is
-    /// used. The test binary lives under target/, not inside a bundle, so this
-    /// locks that behavior in (assuming no ancestor directory is named *.app).
+    /// the probe yields None and the compiled-in version is used instead.
     #[test]
-    fn running_bundle_is_none_outside_a_bundle() {
-        assert!(detect_running_bundle().is_none());
+    fn no_bundle_outside_an_app_directory() {
+        assert_eq!(
+            enclosing_bundle(Path::new("/home/user/project/target/debug/obtainintosh")),
+            None
+        );
     }
 }

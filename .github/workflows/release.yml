@@ -50,14 +50,17 @@ jobs:
           # instead of creating a duplicate draft (or 422ing on a published
           # one). Two lookups on purpose: `releases/tags/<tag>` is O(1) but
           # only ever returns a *published* release, so fall back to scanning
-          # the release list — the only way to find a draft left behind by a
-          # failed earlier run (covers the newest 100 releases).
+          # the paginated release list — the only way to find a draft left
+          # behind by a failed earlier run.
           release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
             --jq '.id' 2>/dev/null || true)"
           if [ -z "$release_id" ]; then
-            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            # --paginate emits one JSON array per page; jq handles the
+            # concatenated arrays and head takes the first match, if any.
+            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
               | jq -r --arg tag "$RELEASE_TAG" \
-                  '[.[] | select(.tag_name == $tag)][0].id // empty')"
+                  '.[] | select(.tag_name == $tag) | .id' \
+              | head -n1)"
           fi
           if [ -n "$release_id" ]; then
             echo "Reusing existing release ${release_id} for ${RELEASE_TAG}"

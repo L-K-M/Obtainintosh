@@ -15,7 +15,8 @@ pub struct Storage {
 /// entry once, on the first launch after upgrading. Runs once per data file:
 /// after the `self_entry_seeded` marker is set, removing the entry sticks. An
 /// existing entry for the same repository (added by hand) is left alone.
-/// Returns whether `data` changed and needs saving.
+/// Returns whether `data` changed and needs saving — setting the marker is
+/// itself such a change, even when no entry was inserted.
 fn seed_self_entry(data: &mut AppData) -> bool {
     if data.self_entry_seeded {
         return false;
