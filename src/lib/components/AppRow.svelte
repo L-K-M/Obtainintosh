@@ -12,7 +12,17 @@
     export let onedit: ((app: App) => void) | undefined = undefined;
     export let onremove: ((id: string) => void) | undefined = undefined;
 
+    let iconFailed = false;
+    let iconIdentity = '';
+
     $: iconUrl = getIconUrl(app);
+    $: {
+        const nextIconIdentity = `${app.id}:${iconUrl ?? ''}`;
+        if (nextIconIdentity !== iconIdentity) {
+            iconIdentity = nextIconIdentity;
+            iconFailed = false;
+        }
+    }
 
     function getIconUrl(app: App): string | null {
         if (app.source_type === 'github') {
@@ -46,15 +56,10 @@
                             src={iconUrl}
                             alt=""
                             class="app-icon-img"
-                            on:error={(e) => {
-                                const img = e.target;
-                                if (img instanceof HTMLImageElement) {
-                                    img.style.display = 'none';
-                                    img.nextElementSibling?.classList.remove('hidden');
-                                }
-                            }}
+                            class:hidden={iconFailed}
+                            on:error={() => iconFailed = true}
                         />
-                        <span class="app-icon fallback-icon hidden">📄</span>
+                        <span class="app-icon fallback-icon" class:hidden={!iconFailed}>📄</span>
                     {:else}
                         <span class="app-icon">📄</span>
                     {/if}
