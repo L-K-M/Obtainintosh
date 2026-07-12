@@ -79,7 +79,14 @@ If a release run fails after the tag is already pushed, there is no need to
 delete and re-push the tag: run the **Release** workflow manually from the
 Actions tab (workflow_dispatch) and pass the existing tag (e.g. `v1.2.3`) as
 the `tag` input. The workflow builds that tagged commit and attaches the
-bundles to a release for it.
+bundles to a release for it. If the failed run already created a draft
+release, the re-dispatch reuses it instead of creating a duplicate.
+
+Note that a dispatched run executes the workflow *file* from the branch you
+dispatch it on (the Actions tab defaults to `main`) while building the tagged
+commit's *source* — so if the workflow changed since the tag, a re-dispatch
+runs the new pipeline against the old code, which is usually exactly what you
+want for fixing a broken release run.
 
 The workflow:
 

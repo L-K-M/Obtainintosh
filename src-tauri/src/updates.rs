@@ -7,7 +7,9 @@
 //!
 //! To reuse in another app, copy this file, set `OWNER`/`REPO`, register
 //! `updates::check_for_update` in the Tauri `invoke_handler`, and add the frontend
-//! `updateChecker.ts` + `UpdateNotice.svelte`.
+//! `updateChecker.ts` + `UpdateNotice.svelte`. (In Obtainintosh this module has
+//! grown app ties beyond the drop-in: the self-tracking helpers below use
+//! `models::App`, and the HTTP call shares `sources::http_client`.)
 
 use crate::models::{App, SourceType};
 use serde::{Deserialize, Serialize};
@@ -71,18 +73,11 @@ pub struct UpdateInfo {
 #[tauri::command]
 pub async fn check_self_update() -> Result<Option<UpdateInfo>, String> {
     let endpoint = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/latest");
-    let client = reqwest::Client::builder()
-        // GitHub's API requires a User-Agent.
-        .user_agent(concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|e| e.to_string())?;
 
-    let response = client
+    let response = crate::sources::http_client()
         .get(endpoint)
+        // GitHub's API requires a User-Agent.
+        .header("User-Agent", crate::sources::USER_AGENT)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()

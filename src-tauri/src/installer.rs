@@ -48,17 +48,20 @@ pub fn detect_installed_app(app_name: &str) -> Option<(String, String)> {
     None
 }
 
-/// Locate the .app bundle the current process runs from — the executable lives
-/// at `<Name>.app/Contents/MacOS/<bin>` — and read its version, like
-/// `detect_installed_app`. Reading from disk (rather than the compiled-in
+/// Locate the .app bundle the current process runs from and read its version,
+/// like `detect_installed_app`. Reading from disk (rather than the compiled-in
 /// version) stays truthful when the bundle is replaced by an update while the
 /// old binary keeps running. Dev builds run outside a bundle and return None.
 pub fn detect_running_bundle() -> Option<(String, String)> {
     let exe = std::env::current_exe().ok()?;
-    let app_dir = exe.parent()?.parent()?.parent()?; // MacOS/ -> Contents/ -> .app
-    if app_dir.extension().and_then(|s| s.to_str()) != Some("app") {
-        return None;
-    }
+    // Resolve symlinks so a linked binary still maps back to its real bundle.
+    let exe = exe.canonicalize().unwrap_or(exe);
+    // Walk up instead of assuming the executable sits exactly at
+    // <Name>.app/Contents/MacOS/<bin>, so helper binaries nested deeper
+    // inside the bundle still resolve.
+    let app_dir = exe
+        .ancestors()
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("app"))?;
     let app_path = app_dir.to_str()?.to_string();
     let version = get_app_version(&app_path)?;
     Some((app_path, version))
