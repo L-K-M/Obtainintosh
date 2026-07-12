@@ -20,6 +20,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # The tag being released: the pushed tag, or the workflow_dispatch input.
+  # Route ALL tag logic through this — on dispatched runs github.ref /
+  # github.ref_name are the branch the workflow ran from, not the tag.
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
@@ -57,6 +59,8 @@ jobs:
           if [ -z "$release_id" ]; then
             # --paginate emits one JSON array per page; jq handles the
             # concatenated arrays and head takes the first match, if any.
+            # Worst case (tag has no release at all) this walks every page,
+            # which is fine for a workflow that runs once per release.
             release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
               | jq -r --arg tag "$RELEASE_TAG" \
                   '.[] | select(.tag_name == $tag) | .id' \

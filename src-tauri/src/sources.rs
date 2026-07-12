@@ -5,14 +5,19 @@ use serde::Deserialize;
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
 /// Canonical form for "is this the same repository?" comparisons: lowercased,
-/// ignoring a trailing slash and a trailing `.git`. Shared by
-/// `Storage::add_app`'s dedupe and `updates::is_self_app` so the two checks
-/// can't drift apart.
+/// `http://` folded into `https://`, ignoring a trailing slash and a trailing
+/// `.git`. Shared by `Storage::add_app`'s dedupe and `updates::is_self_app` so
+/// the two checks can't drift apart.
 pub(crate) fn normalize_repo_url(url: &str) -> String {
-    url.trim_end_matches('/')
+    let url = url
+        .trim_end_matches('/')
         .trim_end_matches(".git")
         .trim_end_matches('/')
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    match url.strip_prefix("http://") {
+        Some(rest) => format!("https://{rest}"),
+        None => url,
+    }
 }
 
 /// Shared HTTP client for API calls: connection reuse, a request timeout so a
@@ -298,6 +303,7 @@ mod tests {
             "https://GitHub.com/owner/repo/",
             "https://github.com/owner/repo.git",
             "https://github.com/owner/repo.git/",
+            "http://github.com/owner/repo",
         ] {
             assert_eq!(
                 super::normalize_repo_url(url),
