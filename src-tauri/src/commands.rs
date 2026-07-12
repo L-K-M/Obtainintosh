@@ -3,11 +3,49 @@ use crate::sources::GitHubAdapter;
 use crate::storage::Storage;
 use crate::system_colors;
 use anyhow::{Context, Result};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{Emitter, State};
 
 pub struct AppState {
     pub storage: Arc<Storage>,
+    pub in_flight_downloads: Arc<Mutex<HashSet<String>>>,
+}
+
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+struct InFlightDownloadGuard {
+    app_id: String,
+    downloads: Arc<Mutex<HashSet<String>>>,
+}
+
+impl InFlightDownloadGuard {
+    fn acquire(app_id: &str, downloads: Arc<Mutex<HashSet<String>>>) -> Result<Self, String> {
+        let mut in_flight = downloads
+            .lock()
+            .map_err(|_| "Download state is unavailable".to_string())?;
+        if !in_flight.insert(app_id.to_string()) {
+            return Err("A download for this app is already in progress".to_string());
+        }
+        drop(in_flight);
+
+        Ok(Self {
+            app_id: app_id.to_string(),
+            downloads,
+        })
+    }
+}
+
+impl Drop for InFlightDownloadGuard {
+    fn drop(&mut self) {
+        let mut downloads = self
+            .downloads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        downloads.remove(&self.app_id);
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -197,6 +235,8 @@ pub async fn download_and_install(
         .get_app(&app_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "App not found".to_string())?;
+    let _download_guard =
+        InFlightDownloadGuard::acquire(&app_id, Arc::clone(&state.in_flight_downloads))?;
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
 
@@ -220,6 +260,10 @@ pub async fn download_and_install(
         release.file_name,
         release.download_url
     );
+    let expected_size = release
+        .file_size
+        .context("GitHub release asset is missing its expected size")
+        .map_err(|e| e.to_string())?;
 
     // Download file, emitting progress events for the frontend
     let progress_handle = app_handle.clone();
@@ -228,6 +272,7 @@ pub async fn download_and_install(
     let download_result = download_file(
         &release.download_url,
         &release.file_name,
+        expected_size,
         move |downloaded, total| {
             let _ = progress_handle.emit(
                 "download-progress",
@@ -249,120 +294,289 @@ pub async fn download_and_install(
         DownloadProgress {
             app_id: app_id.clone(),
             file_name: release.file_name.clone(),
-            downloaded: release.file_size.unwrap_or(0),
-            total: release.file_size,
+            downloaded: expected_size,
+            total: Some(expected_size),
             done: true,
         },
     );
 
     let download_path = download_result.map_err(|e| e.to_string())?;
 
-    log::info!("Downloaded to {}", download_path);
+    log::info!("Downloaded to {}", download_path.display());
 
-    // Instead of trying to install automatically (which requires special entitlements),
-    // just reveal the file in Finder so the user can install it manually
-    log::info!("Revealing file in Finder...");
-
-    // Use 'open -R' to reveal the file in Finder
-    let reveal_output = std::process::Command::new("open")
-        .args(["-R", &download_path])
-        .output();
-
-    match reveal_output {
-        Ok(output) if output.status.success() => {
-            log::info!("File revealed in Finder successfully");
-        }
-        Ok(output) => {
-            log::warn!(
-                "Failed to reveal in Finder: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Err(e) => {
-            log::error!("Error running 'open' command: {}", e);
-        }
-    }
-
-    // Update app to mark that we've downloaded the latest version
+    // Downloading can happen before the first update check. Persist the release
+    // we just fetched so that successful downloads never produce "Not Found".
     let mut updated_app = app;
+    updated_app.latest_version = Some(release.version.clone());
     updated_app.last_checked = Some(chrono::Utc::now().to_rfc3339());
     state
         .storage
         .update_app(updated_app)
         .map_err(|e| e.to_string())?;
 
+    // Instead of trying to install automatically (which requires special entitlements),
+    // just reveal the file in Finder so the user can install it manually
+    log::info!("Revealing file in Finder...");
+    let reveal_message = match reveal_in_finder(&download_path) {
+        Ok(()) => {
+            log::info!("File revealed in Finder successfully");
+            "The file was revealed in Finder. Please double-click it to install.".to_string()
+        }
+        Err(error) => {
+            log::warn!("Failed to reveal in Finder: {error}");
+            format!(
+                "Finder could not reveal the file ({error}). Please open its containing folder manually."
+            )
+        }
+    };
+
     // Return success message with instructions
-    Ok(format!("Download finished: {}\n\nThe file has been revealed in Finder. Please double-click it to install.", download_path))
+    Ok(format!(
+        "Download finished: {}\n\n{reveal_message}",
+        download_path.display()
+    ))
 }
 
 async fn download_file(
     url: &str,
     filename: &str,
+    expected_size: u64,
     on_progress: impl Fn(u64, Option<u64>),
-) -> Result<String> {
+) -> Result<PathBuf> {
     log::debug!(
         "download_file called with url={}, filename={}",
         url,
         filename
     );
 
-    // Asset names come from the GitHub API; keep only the final path component
-    // so a malicious name can't escape the cache directory
-    let filename = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("Invalid asset file name")?;
-
-    // Use system temp directory
-    let cache_dir = std::env::temp_dir().join("obtainintosh-downloads");
-    std::fs::create_dir_all(&cache_dir)?;
-
-    let file_path = cache_dir.join(filename);
-    log::debug!("File path: {:?}", file_path);
-
-    // Connect timeout only: a total request timeout would abort large,
-    // slow downloads that are progressing fine.
+    // Use connection and per-read idle timeouts, but no total request timeout
+    // that would abort large, slow downloads that are still progressing.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .context("Failed to build HTTP client")?;
-    let mut response = client
-        .get(url)
-        .header("User-Agent", crate::sources::USER_AGENT)
-        .send()
-        .await
-        .context("Failed to start download")?;
+    let mut response = tokio::time::timeout(
+        DOWNLOAD_IDLE_TIMEOUT,
+        client
+            .get(url)
+            .header("User-Agent", crate::sources::USER_AGENT)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Download timed out after {} seconds while waiting for a response",
+            DOWNLOAD_IDLE_TIMEOUT.as_secs()
+        )
+    })?
+    .context("Failed to start download")?;
 
     if !response.status().is_success() {
         anyhow::bail!("Download failed: server returned {}", response.status());
     }
 
-    let total = response.content_length();
-    on_progress(0, total);
+    on_progress(0, Some(expected_size));
+
+    let cache_dir = std::env::temp_dir().join("obtainintosh-downloads");
+    std::fs::create_dir_all(&cache_dir).context("Failed to create download directory")?;
+    let paths = download_paths(&cache_dir, filename, uuid::Uuid::new_v4())?;
+    create_private_directory(&paths.directory)?;
+    let mut partial_download = PartialDownload::new(paths);
+    log::debug!(
+        "Partial download path: {:?}",
+        partial_download.paths.partial
+    );
 
     // Stream to disk instead of buffering the whole asset in memory
-    let mut file = tokio::fs::File::create(&file_path)
+    let mut file = tokio::fs::File::create(&partial_download.paths.partial)
         .await
         .context("Failed to create download file")?;
     let mut downloaded: u64 = 0;
     let mut last_reported: u64 = 0;
 
-    while let Some(chunk) = response.chunk().await.context("Failed while downloading")? {
+    loop {
+        let chunk = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, response.chunk())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Download timed out after {} seconds without receiving data",
+                    DOWNLOAD_IDLE_TIMEOUT.as_secs()
+                )
+            })?
+            .context("Failed while downloading")?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
             .await
             .context("Failed to write download file")?;
         downloaded += chunk.len() as u64;
+        if downloaded > expected_size {
+            validate_download_size(downloaded, expected_size)?;
+        }
 
         // Throttle progress events to roughly every 256 KB
         if downloaded - last_reported >= 256 * 1024 {
-            on_progress(downloaded, total);
+            on_progress(downloaded, Some(expected_size));
             last_reported = downloaded;
         }
     }
 
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
-    on_progress(downloaded, total);
-    log::debug!("Downloaded {} bytes to {:?}", downloaded, file_path);
+    validate_download_size(downloaded, expected_size)?;
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .context("Failed to flush download file")?;
+    file.sync_all()
+        .await
+        .context("Failed to sync download file")?;
+    drop(file);
 
-    Ok(file_path.to_string_lossy().to_string())
+    tokio::fs::rename(
+        &partial_download.paths.partial,
+        &partial_download.paths.completed,
+    )
+    .await
+    .context("Failed to publish completed download")?;
+    partial_download.published = true;
+
+    on_progress(downloaded, Some(expected_size));
+    log::debug!(
+        "Downloaded {} bytes to {:?}",
+        downloaded,
+        partial_download.paths.completed
+    );
+
+    Ok(partial_download.paths.completed.clone())
+}
+
+#[derive(Debug)]
+struct DownloadPaths {
+    directory: PathBuf,
+    partial: PathBuf,
+    completed: PathBuf,
+}
+
+fn download_paths(root: &Path, filename: &str, operation_id: uuid::Uuid) -> Result<DownloadPaths> {
+    // Asset names come from the GitHub API; keep only the final path component
+    // so a malicious name can't escape the operation directory.
+    let filename = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Invalid asset file name")?;
+    let directory = root.join(operation_id.to_string());
+
+    Ok(DownloadPaths {
+        partial: directory.join(format!("{filename}.part")),
+        completed: directory.join(filename),
+        directory,
+    })
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .with_context(|| format!("Failed to create private download directory at {:?}", path))
+}
+
+struct PartialDownload {
+    paths: DownloadPaths,
+    published: bool,
+}
+
+impl PartialDownload {
+    fn new(paths: DownloadPaths) -> Self {
+        Self {
+            paths,
+            published: false,
+        }
+    }
+}
+
+impl Drop for PartialDownload {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.paths.partial);
+            let _ = std::fs::remove_dir(&self.paths.directory);
+        }
+    }
+}
+
+fn validate_download_size(actual: u64, expected: u64) -> Result<()> {
+    if actual != expected {
+        anyhow::bail!("Downloaded {actual} bytes, but GitHub reported an asset size of {expected}");
+    }
+    Ok(())
+}
+
+fn reveal_in_finder(path: &Path) -> Result<()> {
+    let output = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .output()
+        .context("could not run the macOS 'open' command")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        anyhow::bail!("the macOS 'open' command exited with {}", output.status);
+    }
+    anyhow::bail!("the macOS 'open' command failed: {detail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_paths_are_unique_and_keep_asset_names_inside_the_operation_directory() {
+        let root = Path::new("download-tests");
+        let first = download_paths(
+            root,
+            "../Example.dmg",
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+        )
+        .unwrap();
+        let second = download_paths(
+            root,
+            "../Example.dmg",
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(first.directory, second.directory);
+        assert_ne!(first.partial, second.partial);
+        assert_ne!(first.completed, second.completed);
+        assert_eq!(first.completed, first.directory.join("Example.dmg"));
+        assert_eq!(first.partial, first.directory.join("Example.dmg.part"));
+    }
+
+    #[test]
+    fn download_size_must_exactly_match_github_asset_size() {
+        assert!(validate_download_size(1024, 1024).is_ok());
+        assert!(validate_download_size(1023, 1024).is_err());
+        assert!(validate_download_size(1025, 1024).is_err());
+    }
+
+    #[test]
+    fn duplicate_downloads_for_the_same_app_are_rejected_until_completion() {
+        let downloads = Arc::new(Mutex::new(HashSet::new()));
+        let first = InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).unwrap();
+
+        assert!(InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).is_err());
+        assert!(InFlightDownloadGuard::acquire("app-2", Arc::clone(&downloads)).is_ok());
+
+        drop(first);
+        assert!(InFlightDownloadGuard::acquire("app-1", downloads).is_ok());
+    }
 }
