@@ -117,8 +117,11 @@ pub struct GitHubAdapter {
 #[derive(Clone, Copy)]
 enum MacArch {
     AppleSilicon,
-    Intel,
+    X86_64,
 }
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+compile_error!("macOS asset selection supports only aarch64 and x86_64 targets");
 
 impl GitHubAdapter {
     pub fn new(token: Option<String>) -> Self {
@@ -213,7 +216,7 @@ impl GitHubAdapter {
         let target_arch = if cfg!(target_arch = "aarch64") {
             MacArch::AppleSilicon
         } else {
-            MacArch::Intel
+            MacArch::X86_64
         };
 
         Self::find_macos_asset_for_arch(assets, target_arch)
@@ -252,6 +255,8 @@ impl GitHubAdapter {
                     return None;
                 }
 
+                // They are separate markers because the boundary check intentionally
+                // does not match "universal" within "universal2".
                 let universal = ["universal", "universal2"]
                     .iter()
                     .any(|marker| has_name_marker(&name, marker));
@@ -262,41 +267,55 @@ impl GitHubAdapter {
                     .iter()
                     .any(|marker| has_name_marker(&name, marker));
                 let unsupported_cpu = [
-                    "armv7", "armv6", "armhf", "i386", "i686", "powerpc", "ppc64", "riscv64",
+                    "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786", "x86_32",
+                    "x86-32", "powerpc", "ppc64", "riscv64",
                 ]
                 .iter()
-                .any(|marker| has_name_marker(&name, marker))
-                    || (has_name_marker(&name, "x86")
-                        && !has_name_marker(&name, "x86_64")
-                        && !has_name_marker(&name, "x86-64"));
+                .any(|marker| has_name_marker(&name, marker));
 
                 if unsupported_cpu
-                    || matches!(target_arch, MacArch::Intel) && arm64 && !intel64 && !universal
+                    || matches!(target_arch, MacArch::X86_64) && arm64 && !intel64 && !universal
                 {
                     return None;
                 }
 
+                // Intel-only builds remain a last-resort option on Apple Silicon because
+                // Rosetta 2 can run them. The reverse is not possible on x86_64 Macs.
                 let architecture_rank = match target_arch {
                     MacArch::AppleSilicon if universal => 0,
                     MacArch::AppleSilicon if arm64 => 1,
                     MacArch::AppleSilicon if !intel64 => 2,
                     MacArch::AppleSilicon => 3,
-                    MacArch::Intel if universal => 0,
-                    MacArch::Intel if intel64 => 1,
-                    MacArch::Intel => 2,
+                    MacArch::X86_64 if universal => 0,
+                    MacArch::X86_64 if intel64 => 1,
+                    MacArch::X86_64 => 2,
                 };
 
                 Some((asset, (architecture_rank, package_rank)))
             })
-            .min_by_key(|(_, rank)| *rank)
-            .map(|(asset, _)| asset);
+            .min_by(|(asset_a, rank_a), (asset_b, rank_b)| {
+                rank_a
+                    .cmp(rank_b)
+                    .then_with(|| asset_a.name.cmp(&asset_b.name))
+            });
 
-        if let Some(asset) = selected {
-            log::debug!("Selected compatible macOS asset: {}", asset.name);
-        } else {
-            log::debug!("No suitable asset found");
+        match selected {
+            Some((asset, (3, _))) if matches!(target_arch, MacArch::AppleSilicon) => {
+                log::warn!(
+                    "Selected Intel-only macOS asset for Apple Silicon; Rosetta 2 is required: {}",
+                    asset.name
+                );
+                Some(asset)
+            }
+            Some((asset, _)) => {
+                log::debug!("Selected compatible macOS asset: {}", asset.name);
+                Some(asset)
+            }
+            None => {
+                log::debug!("No suitable asset found");
+                None
+            }
         }
-        selected
     }
 }
 
@@ -473,25 +492,42 @@ mod tests {
             asset("tool-universal.dmg"),
             asset("tool-arm64.dmg"),
         ];
-        for target_arch in [MacArch::AppleSilicon, MacArch::Intel] {
+        for target_arch in [MacArch::AppleSilicon, MacArch::X86_64] {
             let selected = GitHubAdapter::find_macos_asset_for_arch(&assets, target_arch).unwrap();
             assert_eq!(selected.name, "tool-universal.dmg");
         }
     }
 
     #[test]
-    fn test_native_arch_preferred_on_every_ci_host() {
+    fn test_native_arch_preferred_for_each_target() {
         let assets = vec![
             asset("tool-macos-x86_64.dmg"),
             asset("tool-macos-arm64.dmg"),
         ];
         for (target_arch, expected) in [
             (MacArch::AppleSilicon, "tool-macos-arm64.dmg"),
-            (MacArch::Intel, "tool-macos-x86_64.dmg"),
+            (MacArch::X86_64, "tool-macos-x86_64.dmg"),
         ] {
             let selected = GitHubAdapter::find_macos_asset_for_arch(&assets, target_arch).unwrap();
             assert_eq!(selected.name, expected);
         }
+    }
+
+    #[test]
+    fn test_asset_selection_wrapper_dispatches_to_build_target() {
+        let assets = vec![
+            asset("tool-macos-x86_64.dmg"),
+            asset("tool-macos-arm64.dmg"),
+        ];
+        let target_arch = if cfg!(target_arch = "aarch64") {
+            MacArch::AppleSilicon
+        } else {
+            MacArch::X86_64
+        };
+
+        let selected = GitHubAdapter::find_macos_asset(&assets).unwrap();
+        let expected = GitHubAdapter::find_macos_asset_for_arch(&assets, target_arch).unwrap();
+        assert_eq!(selected.name, expected.name);
     }
 
     #[test]
@@ -510,7 +546,7 @@ mod tests {
             asset("tool-arm64.zip"),
             asset("tool-x86_64.tar.gz"),
         ];
-        for target_arch in [MacArch::AppleSilicon, MacArch::Intel] {
+        for target_arch in [MacArch::AppleSilicon, MacArch::X86_64] {
             assert!(GitHubAdapter::find_macos_asset_for_arch(&assets, target_arch).is_none());
         }
     }
@@ -524,7 +560,7 @@ mod tests {
                 "tool-macos-arm64.zip",
             ),
             (
-                MacArch::Intel,
+                MacArch::X86_64,
                 &["tool-macos-arm64.dmg", "tool-macos-x86_64.zip"],
                 "tool-macos-x86_64.zip",
             ),
@@ -538,6 +574,19 @@ mod tests {
     }
 
     #[test]
+    fn test_equal_scores_use_asset_name_as_tiebreaker() {
+        for names in [
+            ["tool-macos-x86_64-zeta.dmg", "tool-macos-x86_64-alpha.dmg"],
+            ["tool-macos-x86_64-alpha.dmg", "tool-macos-x86_64-zeta.dmg"],
+        ] {
+            let assets: Vec<_> = names.iter().map(|name| asset(name)).collect();
+            let selected =
+                GitHubAdapter::find_macos_asset_for_arch(&assets, MacArch::X86_64).unwrap();
+            assert_eq!(selected.name, "tool-macos-x86_64-alpha.dmg");
+        }
+    }
+
+    #[test]
     fn test_explicit_non_macos_markers_are_rejected() {
         let cases: &[(MacArch, &[&str], &str)] = &[
             (
@@ -546,7 +595,7 @@ mod tests {
                 "tool-macos-arm64.zip",
             ),
             (
-                MacArch::Intel,
+                MacArch::X86_64,
                 &["tool-windows-x86_64.pkg", "tool-macos-x86_64.zip"],
                 "tool-macos-x86_64.zip",
             ),
@@ -573,16 +622,19 @@ mod tests {
         );
 
         let assets = vec![asset("tool-macos-arm64.dmg")];
-        assert!(GitHubAdapter::find_macos_asset_for_arch(&assets, MacArch::Intel).is_none());
+        assert!(GitHubAdapter::find_macos_asset_for_arch(&assets, MacArch::X86_64).is_none());
     }
 
     #[test]
     fn test_unsupported_cpu_assets_are_rejected() {
-        let cases = [
+        for (target_arch, name) in [
             (MacArch::AppleSilicon, "tool-macos-armv7.dmg"),
-            (MacArch::Intel, "tool-macos-arm64.dmg"),
-        ];
-        for (target_arch, name) in cases {
+            (MacArch::AppleSilicon, "tool-macos-x86_32.dmg"),
+            (MacArch::AppleSilicon, "tool-macos-i786.dmg"),
+            (MacArch::X86_64, "tool-macos-arm64.dmg"),
+            (MacArch::X86_64, "tool-macos-x86_32.dmg"),
+            (MacArch::X86_64, "tool-macos-i786.dmg"),
+        ] {
             let assets = vec![asset(name)];
             assert!(GitHubAdapter::find_macos_asset_for_arch(&assets, target_arch).is_none());
         }
