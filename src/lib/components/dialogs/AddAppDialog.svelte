@@ -19,12 +19,19 @@
   let autoFilledName = '';
 
   $: isEdit = !!app;
+  $: isExistingGitLab = app?.source_type === 'gitlab';
 
-  function deriveNameFromUrl(url: string): string | null {
-    const match = url.trim().match(/(?:github|gitlab)\.com\/[^/]+\/([^/?#]+)/i);
-    if (!match) return null;
-    const repoName = match[1].replace(/\.git$/, '');
-    return repoName || null;
+  function deriveNameFromUrl(input: string): string | null {
+    try {
+      const candidate = input.includes('://') ? input.trim() : `https://${input.trim()}`;
+      const parsed = new URL(candidate);
+      if (!['github.com', 'www.github.com'].includes(parsed.hostname.toLowerCase())) return null;
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (parts.length < 2) return null;
+      return parts[1].replace(/\.git$/, '') || null;
+    } catch {
+      return null;
+    }
   }
 
   function handleUrlChange() {
@@ -52,7 +59,7 @@
     event.preventDefault();
 
     if (!url.trim()) {
-      error = 'Please enter a GitHub or GitLab URL';
+      error = 'Please enter a GitHub repository URL';
       return;
     }
 
@@ -75,7 +82,7 @@
         if (onadd) await onadd({ url: url.trim(), name: name.trim() });
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to save program';
+      error = e instanceof Error ? e.message : String(e || 'Failed to save program');
     } finally {
       loading = false;
     }
@@ -84,7 +91,7 @@
 
 <MovableDialog title={app ? 'Edit Program' : 'Add Program'} onclose={close}>
   <div class="s7-form-group" class:has-error={!!error}>
-    <label for="url">GitHub URL</label>
+    <label for="url">{isExistingGitLab ? 'Source URL' : 'GitHub Repository URL'}</label>
     <TextInput
       id="url"
       bind:value={url}
@@ -93,6 +100,14 @@
       oninput={handleUrlChange}
       onkeydown={handleInputKeydown}
     />
+    {#if isExistingGitLab}
+      <span class="source-hint unsupported">
+        This existing GitLab source is retained for display, but update checks and downloads are
+        unsupported. Replace it with a GitHub URL to change the source.
+      </span>
+    {:else}
+      <span class="source-hint">Only github.com repositories are supported.</span>
+    {/if}
     {#if error}
       <span class="s7-error-msg">{error}</span>
     {/if}
@@ -125,6 +140,15 @@
 
   .s7-form-group.has-error :global(.sys7-text-input) {
     border-width: 2px;
+  }
+
+  .source-hint {
+    display: block;
+    margin-top: 4px;
+  }
+
+  .source-hint.unsupported {
+    font-style: italic;
   }
 
   .actions {

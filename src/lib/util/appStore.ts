@@ -37,7 +37,7 @@ function createAppStore() {
                 notifications.add(`App "${name}" added successfully`, 'success');
                 return true;
             } catch (e) {
-                const error = e instanceof Error ? e.message : 'Failed to add program';
+                const error = e instanceof Error ? e.message : String(e || 'Failed to add program');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
                 return false;

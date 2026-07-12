@@ -4,15 +4,82 @@ use serde::Deserialize;
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
-/// Canonical form for "is this the same repository?" comparisons: lowercased,
-/// ignoring a trailing slash and a trailing `.git`. Shared by
-/// `Storage::add_app`'s dedupe and `updates::is_self_app` so the two checks
-/// can't drift apart.
-pub(crate) fn normalize_repo_url(url: &str) -> String {
-    url.trim_end_matches('/')
-        .trim_end_matches(".git")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
+const GITHUB_URL_MESSAGE: &str =
+    "Only GitHub repository URLs are supported (expected github.com/<owner>/<repo>)";
+
+/// Canonical GitHub identity shared by storage dedupe, adapter requests, and
+/// self-entry matching so accepted URLs and identity comparisons cannot drift.
+pub(crate) fn normalize_repo_url(url: &str) -> Result<String> {
+    let (owner, repo) = parse_github_url(url)?;
+    Ok(format!(
+        "https://github.com/{}/{}",
+        owner.to_ascii_lowercase(),
+        repo.to_ascii_lowercase()
+    ))
+}
+
+fn parse_github_url(url: &str) -> Result<(String, String)> {
+    let input = url.trim();
+    let candidate = if input.contains("://") {
+        input.to_string()
+    } else {
+        format!("https://{input}")
+    };
+    let parsed = reqwest::Url::parse(&candidate).context(GITHUB_URL_MESSAGE)?;
+
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        anyhow::bail!(GITHUB_URL_MESSAGE);
+    }
+
+    let host = parsed.host_str().unwrap_or_default();
+    if host.eq_ignore_ascii_case("gitlab.com") || host.eq_ignore_ascii_case("www.gitlab.com") {
+        anyhow::bail!(
+            "GitLab repositories are not supported; enter a GitHub repository URL instead"
+        );
+    }
+    if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+        anyhow::bail!(GITHUB_URL_MESSAGE);
+    }
+
+    let mut parts = parsed.path_segments().context(GITHUB_URL_MESSAGE)?;
+    let owner = parts.next().unwrap_or_default();
+    let repo_segment = parts.next().unwrap_or_default();
+    let repo = if repo_segment
+        .get(repo_segment.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".git"))
+    {
+        &repo_segment[..repo_segment.len() - 4]
+    } else {
+        repo_segment
+    };
+
+    if !valid_github_owner(owner) || !valid_github_repo(repo) {
+        anyhow::bail!(GITHUB_URL_MESSAGE);
+    }
+
+    Ok((owner.to_string(), repo.to_string()))
+}
+
+fn valid_github_owner(owner: &str) -> bool {
+    !owner.is_empty()
+        && owner.len() <= 39
+        && owner.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && owner.ends_with(|c: char| c.is_ascii_alphanumeric())
+        && !owner.contains("--")
+        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn valid_github_repo(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo.len() <= 100
+        && repo != "."
+        && repo != ".."
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Shared HTTP client for API calls: connection reuse plus a request timeout
@@ -75,7 +142,7 @@ impl GitHubAdapter {
     }
 
     pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
-        let (owner, repo) = Self::parse_github_url(repo_url)?;
+        let (owner, repo) = parse_github_url(repo_url)?;
 
         let api_url = format!(
             "https://api.github.com/repos/{}/{}/releases/latest",
@@ -142,39 +209,6 @@ impl GitHubAdapter {
             .context("No releases found for this repository")
     }
 
-    fn parse_github_url(url: &str) -> Result<(String, String)> {
-        let url = url.trim();
-        let without_scheme = url.split("://").last().unwrap_or(url);
-        let mut parts = without_scheme.split('/').filter(|s| !s.is_empty());
-
-        let host = parts.next().unwrap_or_default();
-        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com")
-        {
-            anyhow::bail!("Invalid GitHub URL: expected github.com/<owner>/<repo>");
-        }
-
-        // Ignore anything past owner/repo (e.g. /releases, /tree/main) as well as
-        // query strings, fragments, and a trailing .git.
-        let strip = |s: &str| s.split(['?', '#']).next().unwrap_or("").to_string();
-        let owner = strip(
-            parts
-                .next()
-                .context("GitHub URL is missing the repository owner")?,
-        );
-        let repo = strip(
-            parts
-                .next()
-                .context("GitHub URL is missing the repository name")?,
-        );
-        let repo = repo.trim_end_matches(".git").to_string();
-
-        if owner.is_empty() || repo.is_empty() {
-            anyhow::bail!("Invalid GitHub URL: expected github.com/<owner>/<repo>");
-        }
-
-        Ok((owner, repo))
-    }
-
     fn find_macos_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
         let target_arch = if cfg!(target_arch = "aarch64") {
             MacArch::AppleSilicon
@@ -193,17 +227,15 @@ impl GitHubAdapter {
         let extensions = [".dmg", ".pkg", ".app.tar.gz", ".tar.gz", ".zip"];
         let macos_markers = ["mac", "macos", "macosx", "darwin", "osx"];
         let other_os_markers = [
-            "windows", "win", "win32", "win64", "linux", "linux32", "linux64", "ubuntu",
-            "debian", "android", "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
+            "windows", "win", "win32", "win64", "linux", "linux32", "linux64", "ubuntu", "debian",
+            "android", "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
         ];
 
         let selected = assets
             .iter()
             .filter_map(|asset| {
                 let name = asset.name.to_ascii_lowercase();
-                let package_rank = extensions
-                    .iter()
-                    .position(|ext| name.ends_with(ext))?;
+                let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
 
                 if other_os_markers
                     .iter()
@@ -289,14 +321,9 @@ fn clean_version_tag(tag: &str) -> String {
     tag.to_string()
 }
 
-pub fn detect_source_type(url: &str) -> Option<SourceType> {
-    if url.contains("github.com") {
-        Some(SourceType::GitHub)
-    } else if url.contains("gitlab.com") || url.contains("gitlab") {
-        Some(SourceType::GitLab)
-    } else {
-        None
-    }
+pub fn validate_new_source(url: &str) -> Result<SourceType> {
+    normalize_repo_url(url)?;
+    Ok(SourceType::GitHub)
 }
 
 #[cfg(test)]
@@ -314,15 +341,15 @@ mod tests {
     #[test]
     fn test_parse_github_url_basic() {
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo").unwrap(),
+            parse_github_url("https://github.com/owner/repo").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo/").unwrap(),
+            parse_github_url("https://github.com/owner/repo/").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(
-            GitHubAdapter::parse_github_url("github.com/owner/repo").unwrap(),
+            parse_github_url("github.com/owner/repo").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
     }
@@ -334,9 +361,10 @@ mod tests {
             "https://GitHub.com/owner/repo/",
             "https://github.com/owner/repo.git",
             "https://github.com/owner/repo.git/",
+            "https://www.github.com/OWNER/REPO.GIT/releases/latest?download=1#asset",
         ] {
             assert_eq!(
-                super::normalize_repo_url(url),
+                super::normalize_repo_url(url).unwrap(),
                 "https://github.com/owner/repo",
                 "normalizing {}",
                 url
@@ -348,12 +376,11 @@ mod tests {
     fn test_parse_github_url_extra_segments() {
         // URLs deeper than the repo root should still resolve to owner/repo
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo/releases/latest")
-                .unwrap(),
+            parse_github_url("https://github.com/owner/repo/releases/latest").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo/tree/main/src").unwrap(),
+            parse_github_url("https://github.com/owner/repo/tree/main/src").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
     }
@@ -361,25 +388,47 @@ mod tests {
     #[test]
     fn test_parse_github_url_git_suffix_and_query() {
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo.git").unwrap(),
+            parse_github_url("https://github.com/owner/repo.git").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo?tab=readme").unwrap(),
+            parse_github_url("https://github.com/owner/repo?tab=readme").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://www.github.com/owner/repo#readme").unwrap(),
+            parse_github_url("https://www.github.com/owner/repo#readme").unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
     }
 
     #[test]
     fn test_parse_github_url_invalid() {
-        assert!(GitHubAdapter::parse_github_url("https://github.com/owner").is_err());
-        assert!(GitHubAdapter::parse_github_url("https://github.com/").is_err());
-        assert!(GitHubAdapter::parse_github_url("https://example.com/owner/repo").is_err());
-        assert!(GitHubAdapter::parse_github_url("not a url").is_err());
+        assert!(parse_github_url("https://github.com/owner").is_err());
+        assert!(parse_github_url("https://github.com/").is_err());
+        assert!(parse_github_url("https://example.com/owner/repo").is_err());
+        assert!(parse_github_url("not a url").is_err());
+    }
+
+    #[test]
+    fn rejects_lookalike_github_hosts() {
+        for url in [
+            "https://github.com.evil.example/owner/repo",
+            "https://evil-github.com/owner/repo",
+            "https://github.com@evil.example/owner/repo",
+            "https://evil.example/github.com/owner/repo",
+            "https://github.com.evil.example/github.com/owner/repo",
+        ] {
+            assert!(parse_github_url(url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn rejects_gitlab_with_github_only_message() {
+        let error = validate_new_source("https://gitlab.com/owner/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GitLab repositories are not supported"));
+        assert!(error.contains("GitHub"));
     }
 
     #[test]
@@ -483,8 +532,7 @@ mod tests {
 
         for (target_arch, names, expected) in cases {
             let assets: Vec<_> = names.iter().map(|name| asset(name)).collect();
-            let selected =
-                GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
+            let selected = GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
             assert_eq!(selected.name, *expected);
         }
     }
@@ -506,8 +554,7 @@ mod tests {
 
         for (target_arch, names, expected) in cases {
             let assets: Vec<_> = names.iter().map(|name| asset(name)).collect();
-            let selected =
-                GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
+            let selected = GitHubAdapter::find_macos_asset_for_arch(&assets, *target_arch).unwrap();
             assert_eq!(selected.name, *expected);
         }
     }

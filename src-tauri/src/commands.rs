@@ -65,9 +65,7 @@ pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String
 
 #[tauri::command]
 pub async fn add_app(url: String, name: String, state: State<'_, AppState>) -> Result<App, String> {
-    // Detect source type
-    let source_type = crate::sources::detect_source_type(&url)
-        .ok_or_else(|| "Unsupported source URL".to_string())?;
+    let source_type = crate::sources::validate_new_source(&url).map_err(|e| e.to_string())?;
 
     // Check if app is already installed
     let (current_version, install_path) =
@@ -112,18 +110,41 @@ pub async fn update_app(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "App not found".to_string())?;
 
-    // Update fields
-    app.name = name;
-    if app.source_url != url {
+    let mut source_url = url;
+    let source_changed = match app.source_type {
+        SourceType::GitLab if app.source_url.trim() == source_url.trim() => {
+            source_url = app.source_url.clone();
+            false
+        }
+        _ => {
+            let new_identity =
+                crate::sources::normalize_repo_url(&source_url).map_err(|e| e.to_string())?;
+            let old_identity = crate::sources::normalize_repo_url(&app.source_url).ok();
+            app.source_type = SourceType::GitHub;
+            old_identity.as_deref() != Some(&new_identity)
+        }
+    };
+
+    if source_changed {
         // Version info from the old source is meaningless for the new one
         app.latest_version = None;
         app.last_checked = None;
-        app.source_url = url;
     }
+    app.source_url = source_url;
 
-    // Re-detect source type in case URL changed
-    app.source_type = crate::sources::detect_source_type(&app.source_url)
-        .ok_or_else(|| "Unsupported source URL".to_string())?;
+    if app.name != name {
+        match crate::installer::detect_installed_app(&name) {
+            Some((path, version)) => {
+                app.current_version = Some(version);
+                app.install_path = Some(path);
+            }
+            None => {
+                app.current_version = None;
+                app.install_path = None;
+            }
+        }
+    }
+    app.name = name;
 
     state
         .storage
@@ -182,7 +203,9 @@ pub async fn check_for_updates(
                 let adapter = GitHubAdapter::new(settings.github_token.clone());
                 adapter.get_latest_release(&app.source_url).await
             }
-            SourceType::GitLab => Err(anyhow::anyhow!("GitLab support not yet implemented")),
+            SourceType::GitLab => Err(anyhow::anyhow!(
+                "This existing GitLab source is unsupported; only GitHub repositories can be checked"
+            )),
         };
 
         match result {
@@ -251,7 +274,10 @@ pub async fn download_and_install(
                 .map_err(|e| e.to_string())?
         }
         SourceType::GitLab => {
-            return Err("GitLab support not yet implemented".to_string());
+            return Err(
+                "This existing GitLab source is unsupported; only GitHub repositories can be downloaded"
+                    .to_string(),
+            );
         }
     };
 

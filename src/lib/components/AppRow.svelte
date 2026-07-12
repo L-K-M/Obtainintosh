@@ -34,7 +34,7 @@
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <tr class:has-update={hasUpdate}>
     <td class="col-name clickable" on:dblclick={() => { if(onopenurl) onopenurl(app.source_url); }}>
-        <BalloonHelp message="Double-click to open the GitHub page">
+        <BalloonHelp message="Double-click to open the source page">
             <div class="name-cell">
                 {#if iconUrl}
                     <img
@@ -64,7 +64,14 @@
         {app.latest_version || '-'}
     </td>
     <td class="col-status">
-        {#if hasUpdate}
+        {#if app.source_type === 'gitlab'}
+            <BalloonHelp message="This existing GitLab source is retained for display, but GitLab update checks and downloads are not supported.">
+                <span class="status-badge unsupported">
+                    <img src={alertIcon} alt="Alert" class="alert-icon"/>
+                    Unsupported
+                </span>
+            </BalloonHelp>
+        {:else if hasUpdate}
             <span class="status-badge update">Update Available</span>
         {:else if !app.last_checked}
             <BalloonHelp message="This program hasn't been checked for updates yet.">
@@ -85,7 +92,9 @@
     </td>
     <td class="col-actions">
         <div class="action-buttons">
-            {#if hasUpdate}
+            {#if app.source_type === 'gitlab'}
+                <!-- Existing GitLab records remain visible and editable, but cannot be downloaded. -->
+            {:else if hasUpdate}
                 <BalloonHelp message="Download and save the update for this program">
                     <Button variant="icon" onclick={() => { if(oninstall) oninstall(app.id); }}>
                         <DownloadIcon alt="Update"/>

@@ -33,6 +33,7 @@
     }
 
     function hasUpdate(app: App): boolean {
+        if (app.source_type !== 'github') return false;
         if (!app.current_version || !app.latest_version) return false;
 
         const current = cleanVersion(app.current_version);
@@ -89,6 +90,9 @@
     }
 
     function statusRank(app: App): number {
+        if (app.source_type === 'gitlab') {
+            return 4;
+        }
         if (hasUpdate(app)) {
             return 0;
         }

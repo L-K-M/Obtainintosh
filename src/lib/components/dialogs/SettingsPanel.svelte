@@ -64,21 +64,6 @@
                 <button type="button" class="link" on:click={() => openUrl('https://github.com/settings/tokens')}>Generate token →</button>
             </div>
         </div>
-        <!--
-        <div class="form-group">
-            <label for="gitlab-token">GitLab Personal Access Token</label>
-            <input
-                    id="gitlab-token"
-                    type="password"
-                    placeholder="glpat-xxxxxxxxxxxx (optional)"
-                    bind:value={settings.gitlab_token}
-            />
-            <div class="hint">
-                Optional. For GitLab repositories.
-                <button type="button" class="link" on:click={() => openUrl('https://gitlab.com/-/user_settings/personal_access_tokens')}>Generate token →</button>
-            </div>
-        </div>
-        -->
         {#if error}
             <div class="error">{error}</div>
         {/if}

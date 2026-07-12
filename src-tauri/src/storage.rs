@@ -1,4 +1,4 @@
-use crate::models::{App, AppData, Settings};
+use crate::models::{App, AppData, Settings, SourceType};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -84,18 +84,20 @@ impl Storage {
     }
 
     pub fn add_app(&self, mut app: App) -> Result<App> {
+        let new_identity = match app.source_type {
+            SourceType::GitHub => crate::sources::normalize_repo_url(&app.source_url)?,
+            SourceType::GitLab => anyhow::bail!(
+                "GitLab repositories are not supported; enter a GitHub repository URL instead"
+            ),
+        };
+
         // Generate UUID if not provided
         if app.id.is_empty() {
             app.id = uuid::Uuid::new_v4().to_string();
         }
 
-        let new_url = crate::sources::normalize_repo_url(&app.source_url);
         let mut data = self.data.lock().unwrap();
-        if data
-            .apps
-            .iter()
-            .any(|a| crate::sources::normalize_repo_url(&a.source_url) == new_url)
-        {
+        if has_duplicate_github_source(&data.apps, &new_identity, None) {
             anyhow::bail!("This repository is already being tracked");
         }
         data.apps.push(app.clone());
@@ -107,12 +109,31 @@ impl Storage {
 
     pub fn update_app(&self, updated_app: App) -> Result<()> {
         let mut data = self.data.lock().unwrap();
+        let index = data
+            .apps
+            .iter()
+            .position(|app| app.id == updated_app.id)
+            .with_context(|| format!("App not found: {}", updated_app.id))?;
 
-        if let Some(app) = data.apps.iter_mut().find(|a| a.id == updated_app.id) {
-            *app = updated_app;
-        } else {
-            anyhow::bail!("App not found: {}", updated_app.id);
+        match updated_app.source_type {
+            SourceType::GitHub => {
+                let identity = crate::sources::normalize_repo_url(&updated_app.source_url)?;
+                if has_duplicate_github_source(&data.apps, &identity, Some(&updated_app.id)) {
+                    anyhow::bail!("This repository is already being tracked");
+                }
+            }
+            SourceType::GitLab
+                if !matches!(data.apps[index].source_type, SourceType::GitLab)
+                    || data.apps[index].source_url != updated_app.source_url =>
+            {
+                anyhow::bail!(
+                    "GitLab repositories are not supported; enter a GitHub repository URL instead"
+                );
+            }
+            SourceType::GitLab => {}
         }
+
+        data.apps[index] = updated_app;
 
         drop(data);
         self.save()
@@ -140,10 +161,42 @@ impl Storage {
     }
 }
 
+fn has_duplicate_github_source(apps: &[App], identity: &str, excluding_id: Option<&str>) -> bool {
+    apps.iter().any(|app| {
+        excluding_id != Some(app.id.as_str())
+            && matches!(app.source_type, SourceType::GitHub)
+            && crate::sources::normalize_repo_url(&app.source_url)
+                .is_ok_and(|existing| existing == identity)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{App, SourceType};
+
+    fn test_storage() -> Storage {
+        Storage {
+            file_path: std::env::temp_dir().join(format!(
+                "obtainintosh-storage-test-{}.json",
+                uuid::Uuid::new_v4()
+            )),
+            data: Mutex::new(AppData::default()),
+        }
+    }
+
+    fn app(id: &str, source_type: SourceType, source_url: &str) -> App {
+        App {
+            id: id.to_string(),
+            name: id.to_string(),
+            source_type,
+            source_url: source_url.to_string(),
+            current_version: None,
+            latest_version: None,
+            install_path: None,
+            last_checked: None,
+        }
+    }
 
     #[test]
     fn seeds_self_entry_into_fresh_data() {
@@ -166,8 +219,8 @@ mod tests {
 
     #[test]
     fn does_not_duplicate_a_manually_added_self_entry() {
-        // Same repo, different spellings: matching is case-insensitive and
-        // ignores a trailing slash or `.git`, like Storage::add_app's dedupe.
+        // Same repo, different spellings: matching uses the same canonical
+        // GitHub identity as Storage::add_app's dedupe.
         // Derived from self_repo_url() so these keep exercising the match
         // paths if OWNER/REPO ever change.
         let variants = [
@@ -191,5 +244,86 @@ mod tests {
             assert_eq!(data.apps[0].id, "existing");
             assert!(data.self_entry_seeded);
         }
+    }
+
+    #[test]
+    fn add_rejects_equivalent_github_urls() {
+        let storage = test_storage();
+        storage
+            .add_app(app(
+                "first",
+                SourceType::GitHub,
+                "https://github.com/Owner/Repo",
+            ))
+            .unwrap();
+
+        let error = storage
+            .add_app(app(
+                "second",
+                SourceType::GitHub,
+                "https://www.github.com/owner/repo.git/releases/latest?download=1#asset",
+            ))
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "This repository is already being tracked");
+        assert_eq!(storage.get_all_apps().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn edit_rejects_a_duplicate_github_identity_atomically() {
+        let storage = test_storage();
+        storage
+            .add_app(app(
+                "first",
+                SourceType::GitHub,
+                "https://github.com/owner/first",
+            ))
+            .unwrap();
+        storage
+            .add_app(app(
+                "second",
+                SourceType::GitHub,
+                "https://github.com/owner/second",
+            ))
+            .unwrap();
+
+        let mut second = storage.get_app("second").unwrap().unwrap();
+        second.source_url =
+            "https://www.github.com/OWNER/FIRST.git/tree/main?tab=readme#files".to_string();
+        let error = storage.update_app(second).unwrap_err().to_string();
+
+        assert_eq!(error, "This repository is already being tracked");
+        assert_eq!(
+            storage.get_app("second").unwrap().unwrap().source_url,
+            "https://github.com/owner/second"
+        );
+    }
+
+    #[test]
+    fn add_rejects_gitlab_but_existing_gitlab_records_remain_editable() {
+        let storage = test_storage();
+        let gitlab: App = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "legacy",
+            "source_type": "gitlab",
+            "source_url": "https://gitlab.com/owner/repo",
+            "current_version": null,
+            "latest_version": null,
+            "install_path": null,
+            "last_checked": null
+        }))
+        .unwrap();
+        let error = storage.add_app(gitlab.clone()).unwrap_err().to_string();
+        assert!(error.contains("GitLab repositories are not supported"));
+
+        storage.data.lock().unwrap().apps.push(gitlab);
+        let mut existing = storage.get_app("legacy").unwrap().unwrap();
+        existing.name = "Renamed legacy app".to_string();
+        storage.update_app(existing).unwrap();
+
+        let preserved = storage.get_app("legacy").unwrap().unwrap();
+        assert_eq!(preserved.source_type, SourceType::GitLab);
+        assert_eq!(preserved.name, "Renamed legacy app");
     }
 }
