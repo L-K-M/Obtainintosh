@@ -27,6 +27,12 @@
         },
         {
           "url": "https://gitlab.com/*"
+        },
+        {
+          "url": "http://www.gitlab.com/*"
+        },
+        {
+          "url": "https://www.gitlab.com/*"
         }
       ]
     },
