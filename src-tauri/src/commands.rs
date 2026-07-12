@@ -5,7 +5,6 @@ use crate::sources::GitHubAdapter;
 use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
 use crate::system_colors;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,40 +12,42 @@ use tauri::{Emitter, State};
 
 pub struct AppState {
     pub storage: Arc<Storage>,
-    pub in_flight_downloads: Arc<Mutex<HashSet<String>>>,
+    pub active_download: Arc<Mutex<Option<String>>>,
 }
 
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct InFlightDownloadGuard {
-    app_id: String,
-    downloads: Arc<Mutex<HashSet<String>>>,
+    active_download: Arc<Mutex<Option<String>>>,
 }
 
 impl InFlightDownloadGuard {
-    fn acquire(app_id: &str, downloads: Arc<Mutex<HashSet<String>>>) -> Result<Self, String> {
-        let mut in_flight = downloads
+    fn acquire(
+        operation: &str,
+        active_download: Arc<Mutex<Option<String>>>,
+    ) -> Result<Self, String> {
+        let mut active = active_download
             .lock()
             .map_err(|_| "Download state is unavailable".to_string())?;
-        if !in_flight.insert(app_id.to_string()) {
-            return Err("A download for this app is already in progress".to_string());
+        if let Some(active_operation) = active.as_deref() {
+            return Err(format!(
+                "A download for {active_operation} is already in progress; wait for it to finish before starting another"
+            ));
         }
-        drop(in_flight);
+        *active = Some(operation.to_string());
+        drop(active);
 
-        Ok(Self {
-            app_id: app_id.to_string(),
-            downloads,
-        })
+        Ok(Self { active_download })
     }
 }
 
 impl Drop for InFlightDownloadGuard {
     fn drop(&mut self) {
-        let mut downloads = self
-            .downloads
+        let mut active = self
+            .active_download
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        downloads.remove(&self.app_id);
+        active.take();
     }
 }
 
@@ -348,8 +349,9 @@ pub async fn download_and_install(
         .get_app(&app_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "App not found".to_string())?;
+    let download_operation = format!("{} ({})", app.name, app.id);
     let _download_guard =
-        InFlightDownloadGuard::acquire(&app_id, Arc::clone(&state.in_flight_downloads))?;
+        InFlightDownloadGuard::acquire(&download_operation, Arc::clone(&state.active_download))?;
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
 
@@ -703,14 +705,22 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_downloads_for_the_same_app_are_rejected_until_completion() {
-        let downloads = Arc::new(Mutex::new(HashSet::new()));
-        let first = InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).unwrap();
+    fn downloads_are_globally_serialized_and_can_be_reacquired() {
+        let active_download = Arc::new(Mutex::new(None));
+        let first = InFlightDownloadGuard::acquire("App One (app-1)", Arc::clone(&active_download))
+            .unwrap();
 
-        assert!(InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).is_err());
-        assert!(InFlightDownloadGuard::acquire("app-2", Arc::clone(&downloads)).is_ok());
+        let error =
+            match InFlightDownloadGuard::acquire("App Two (app-2)", Arc::clone(&active_download)) {
+                Ok(_) => panic!("a cross-app download should be rejected"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            "A download for App One (app-1) is already in progress; wait for it to finish before starting another"
+        );
 
         drop(first);
-        assert!(InFlightDownloadGuard::acquire("app-1", downloads).is_ok());
+        assert!(InFlightDownloadGuard::acquire("App Two (app-2)", active_download).is_ok());
     }
 }

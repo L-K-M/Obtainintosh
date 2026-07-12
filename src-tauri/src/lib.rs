@@ -19,7 +19,7 @@ pub fn run() {
     let storage = storage::Storage::new().expect("Failed to initialize storage");
     let app_state = AppState {
         storage: Arc::new(storage),
-        in_flight_downloads: Arc::new(Default::default()),
+        active_download: Arc::new(Default::default()),
     };
 
     tauri::Builder::default()
