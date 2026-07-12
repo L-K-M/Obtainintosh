@@ -1,7 +1,7 @@
 use crate::models::{App, AppData, CheckAttempt, CheckAttemptState, Settings, SourceType};
 use anyhow::{Context, Result};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -76,16 +76,71 @@ fn tighten_storage_file_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(PRIVATE_FILE_MODE);
+struct PrivateTempFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+    cleanup: bool,
+}
 
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
-    file.write_all(contents)
+impl PrivateTempFile {
+    fn create(destination: &Path) -> io::Result<Self> {
+        let file_name = destination.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Storage path has no file name")
+        })?;
+        let mut options = fs::OpenOptions::new();
+        // Exclusive creation atomically rejects pre-existing files and symlinks.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(PRIVATE_FILE_MODE);
+
+        loop {
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            let path = destination.with_file_name(temp_name);
+            match options.open(&path) {
+                Ok(file) => {
+                    let temp = Self {
+                        path,
+                        file: Some(file),
+                        cleanup: true,
+                    };
+                    #[cfg(unix)]
+                    temp.file
+                        .as_ref()
+                        .unwrap()
+                        .set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+                    return Ok(temp);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_all(&mut self, contents: &[u8]) -> io::Result<()> {
+        self.file.as_mut().unwrap().write_all(contents)
+    }
+
+    fn replace(mut self, destination: &Path) -> io::Result<()> {
+        self.file.take();
+        fs::rename(&self.path, destination)?;
+        self.cleanup = false;
+        Ok(())
+    }
+}
+
+impl Drop for PrivateTempFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if self.cleanup {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl Storage {
@@ -142,10 +197,13 @@ impl Storage {
     fn persist(&self, data: &AppData) -> Result<()> {
         let json = serde_json::to_string_pretty(data).context("Failed to serialize data")?;
 
-        // Atomic write: write to temp file then rename
-        let temp_path = self.file_path.with_extension("json.tmp");
-        write_private_file(&temp_path, json.as_bytes()).context("Failed to write temp file")?;
-        fs::rename(&temp_path, &self.file_path).context("Failed to rename temp file")?;
+        // Atomic write: write to a private sibling file then rename.
+        let mut temp =
+            PrivateTempFile::create(&self.file_path).context("Failed to write temp file")?;
+        temp.write_all(json.as_bytes())
+            .context("Failed to write temp file")?;
+        temp.replace(&self.file_path)
+            .context("Failed to rename temp file")?;
 
         Ok(())
     }
@@ -254,7 +312,10 @@ impl Storage {
             return Ok(PendingResultApplication::AppRemoved);
         };
         let current = &data.apps[index];
-        if current.name != snapshot.name || !same_source_identity(current, snapshot) {
+        if current.name != snapshot.name
+            || !same_source_identity(current, snapshot)
+            || !same_check_metadata(current, snapshot)
+        {
             return Ok(PendingResultApplication::DependenciesChanged);
         }
 
@@ -284,10 +345,7 @@ impl Storage {
             return Ok(PendingResultApplication::AppRemoved);
         };
         let current = &data.apps[index];
-        if !same_source_identity(current, snapshot)
-            || current.latest_version != snapshot.latest_version
-            || current.last_checked != snapshot.last_checked
-        {
+        if !same_source_identity(current, snapshot) || !same_check_metadata(current, snapshot) {
             return Ok(PendingResultApplication::DependenciesChanged);
         }
 
@@ -355,6 +413,12 @@ fn same_source_identity(left: &App, right: &App) -> bool {
     }
 }
 
+fn same_check_metadata(left: &App, right: &App) -> bool {
+    left.latest_version == right.latest_version
+        && left.last_checked == right.last_checked
+        && left.last_check_attempt == right.last_check_attempt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +456,20 @@ mod tests {
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn storage_temp_paths(file_path: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", file_path.file_name().unwrap().to_string_lossy());
+        let mut paths = fs::read_dir(file_path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy();
+                (name.starts_with(&prefix) && name.ends_with(".tmp")).then_some(path)
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
     }
 
     fn test_storage() -> (Storage, TestDir) {
@@ -481,12 +559,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
-        assert!(!file_path.with_extension("json.tmp").exists());
+        assert!(storage_temp_paths(&file_path).is_empty());
+    }
+
+    #[test]
+    fn private_temp_files_are_unique_siblings_and_cleanup_on_drop() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let first = PrivateTempFile::create(&file_path).unwrap();
+        let second = PrivateTempFile::create(&file_path).unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(first_path.parent(), file_path.parent());
+        assert_eq!(second_path.parent(), file_path.parent());
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&first_path), PRIVATE_FILE_MODE);
+            assert_eq!(mode(&second_path), PRIVATE_FILE_MODE);
+        }
+        assert_eq!(storage_temp_paths(&file_path).len(), 2);
+
+        drop(first);
+        drop(second);
+        assert!(storage_temp_paths(&file_path).is_empty());
     }
 
     #[cfg(unix)]
     #[test]
-    fn failed_atomic_replacement_leaves_an_owner_only_temp_file() {
+    fn fixed_temp_symlink_is_not_followed() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let fixed_temp_path = file_path.with_extension("json.tmp");
+        let victim_path = temp_dir.path().join("victim");
+        fs::write(&victim_path, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim_path, &fixed_temp_path).unwrap();
+        let storage = Storage {
+            file_path: file_path.clone(),
+            data: Mutex::new(AppData::default()),
+        };
+
+        storage.persist(&AppData::default()).unwrap();
+
+        assert_eq!(fs::read(&victim_path).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&fixed_temp_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(storage_temp_paths(&file_path), vec![fixed_temp_path]);
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+    }
+
+    #[test]
+    fn failed_atomic_replacement_cleans_unique_temp_file() {
         let temp_dir = TestDir::new();
         let file_path = temp_dir.path().join("apps.json");
         fs::create_dir(&file_path).unwrap();
@@ -497,11 +623,11 @@ mod tests {
 
         let error = storage.persist(&AppData::default()).unwrap_err();
 
-        assert_eq!(error.to_string(), "Failed to rename temp file");
-        assert_eq!(
-            mode(&file_path.with_extension("json.tmp")),
-            PRIVATE_FILE_MODE
+        assert!(
+            error.to_string().contains("rename"),
+            "unexpected error: {error}"
         );
+        assert!(storage_temp_paths(&file_path).is_empty());
     }
 
     #[test]
@@ -842,9 +968,10 @@ mod tests {
                 },
             )
             .unwrap();
+        let failure_snapshot = storage.get_app("attempts").unwrap().unwrap();
         storage
             .apply_check_result(
-                &snapshot,
+                &failure_snapshot,
                 CheckOwnedUpdate {
                     current_version: Some("1.0.0".to_string()),
                     install_path: Some("/Applications/Attempts.app".to_string()),
@@ -868,9 +995,10 @@ mod tests {
             Some("GitHub was unavailable")
         );
 
+        let success_snapshot = storage.get_app("attempts").unwrap().unwrap();
         storage
             .apply_check_result(
-                &snapshot,
+                &success_snapshot,
                 CheckOwnedUpdate {
                     current_version: Some("1.0.0".to_string()),
                     install_path: Some("/Applications/Attempts.app".to_string()),
@@ -886,6 +1014,62 @@ mod tests {
         let succeeded_attempt = succeeded.last_check_attempt.unwrap();
         assert_eq!(succeeded_attempt.state, CheckAttemptState::Succeeded);
         assert_eq!(succeeded_attempt.message, None);
+    }
+
+    #[test]
+    fn older_overlapping_check_cannot_overwrite_a_newer_completion() {
+        let (storage, _temp_dir) = test_storage();
+        storage
+            .add_app(app(
+                "overlap",
+                SourceType::GitHub,
+                "https://github.com/owner/overlap",
+            ))
+            .unwrap();
+        let older_snapshot = storage.get_app("overlap").unwrap().unwrap();
+        let newer_snapshot = older_snapshot.clone();
+
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &newer_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: Some("2.0.0".to_string()),
+                        install_path: Some("/Applications/Overlap.app".to_string()),
+                        latest_version: Some("3.0.0".to_string()),
+                        attempt: CheckAttempt::succeeded("newer-completion".to_string()),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::Applied
+        );
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &older_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: Some("1.0.0".to_string()),
+                        install_path: Some("/stale/Overlap.app".to_string()),
+                        latest_version: Some("2.0.0".to_string()),
+                        attempt: CheckAttempt::succeeded("older-completion".to_string()),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::DependenciesChanged
+        );
+
+        let current = storage.get_app("overlap").unwrap().unwrap();
+        assert_eq!(current.current_version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            current.install_path.as_deref(),
+            Some("/Applications/Overlap.app")
+        );
+        assert_eq!(current.latest_version.as_deref(), Some("3.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("newer-completion"));
+        assert_eq!(
+            current.last_check_attempt.unwrap().attempted_at,
+            "newer-completion"
+        );
     }
 
     #[test]
@@ -994,6 +1178,58 @@ mod tests {
         assert_eq!(current.latest_version.as_deref(), Some("2.0.0"));
         assert_eq!(current.last_checked.as_deref(), Some("v2-check"));
         assert_eq!(current.last_check_attempt.unwrap().attempted_at, "v2-check");
+    }
+
+    #[test]
+    fn download_cannot_hide_a_failed_check_that_completed_during_transfer() {
+        let (storage, _temp_dir) = test_storage();
+        let mut tracked = app(
+            "download",
+            SourceType::GitHub,
+            "https://github.com/owner/download",
+        );
+        tracked.latest_version = Some("1.0.0".to_string());
+        tracked.last_checked = Some("successful-check".to_string());
+        tracked.last_check_attempt = Some(CheckAttempt::succeeded("successful-check".to_string()));
+        storage.add_app(tracked).unwrap();
+        let download_snapshot = storage.get_app("download").unwrap().unwrap();
+
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &download_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: None,
+                        install_path: None,
+                        latest_version: None,
+                        attempt: CheckAttempt::unsuccessful(
+                            "failed-check".to_string(),
+                            CheckAttemptState::Failed,
+                            "GitHub was unavailable",
+                        ),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::Applied
+        );
+        assert_eq!(
+            storage
+                .apply_download_release(
+                    &download_snapshot,
+                    "1.0.0".to_string(),
+                    "download-finished".to_string(),
+                )
+                .unwrap(),
+            PendingResultApplication::DependenciesChanged
+        );
+
+        let current = storage.get_app("download").unwrap().unwrap();
+        assert_eq!(current.latest_version.as_deref(), Some("1.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("successful-check"));
+        let attempt = current.last_check_attempt.unwrap();
+        assert_eq!(attempt.attempted_at, "failed-check");
+        assert_eq!(attempt.state, CheckAttemptState::Failed);
+        assert_eq!(attempt.message.as_deref(), Some("GitHub was unavailable"));
     }
 
     #[test]
