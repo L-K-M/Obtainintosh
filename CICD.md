@@ -26,8 +26,9 @@ The CI workflow has two parallel jobs:
   (`vite build`).
 - **Rust (fmt, clippy, test)** — builds the frontend into `build/` first
   (because `tauri::generate_context!` embeds it at compile time), then runs
-  `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and
-  `cargo test`. `Swatinem/rust-cache` caches the cargo build between runs. This job
+  `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  and `cargo test --locked`. `Swatinem/rust-cache` caches the cargo build between
+  runs. This job
   runs on macOS because the backend's system accent color support
   (`#[cfg(target_os = "macos")]` + `objc2-app-kit`) only compiles there; the
   macOS `.dmg` is built by the release workflow.
@@ -52,8 +53,8 @@ npm run build
 # Rust (run from src-tauri/)
 cd src-tauri
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
 
 On Linux you also need the Tauri system dependencies (`libwebkit2gtk-4.1-dev`,
