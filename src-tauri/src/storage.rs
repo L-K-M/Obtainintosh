@@ -1,8 +1,16 @@
 use crate::models::{App, AppData, Settings, SourceType};
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+#[cfg(unix)]
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 pub struct Storage {
     file_path: PathBuf,
@@ -25,6 +33,47 @@ fn seed_self_entry(data: &mut AppData) -> bool {
     true
 }
 
+fn prepare_storage_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(PRIVATE_DIRECTORY_MODE);
+        builder
+            .create(path)
+            .context("Failed to create application support directory")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
+            .context("Failed to secure application support directory")?;
+    }
+
+    #[cfg(not(unix))]
+    fs::create_dir_all(path).context("Failed to create application support directory")?;
+
+    Ok(())
+}
+
+fn tighten_storage_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+        .context("Failed to secure apps.json")?;
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(PRIVATE_FILE_MODE);
+
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    file.write_all(contents)
+}
+
 impl Storage {
     pub fn new() -> Result<Self> {
         let app_support = dirs::home_dir()
@@ -33,9 +82,7 @@ impl Storage {
             .join("Application Support")
             .join("Obtainintosh");
 
-        // Create directory if it doesn't exist
-        fs::create_dir_all(&app_support)
-            .context("Failed to create application support directory")?;
+        prepare_storage_directory(&app_support)?;
 
         Self::load_from_path(app_support.join("apps.json"))
     }
@@ -43,6 +90,7 @@ impl Storage {
     fn load_from_path(file_path: PathBuf) -> Result<Self> {
         // Load existing data or create new
         let mut data = if file_path.exists() {
+            tighten_storage_file_permissions(&file_path)?;
             let contents = fs::read(&file_path).context("Failed to read apps.json")?;
             match serde_json::from_slice(&contents) {
                 Ok(data) => data,
@@ -82,7 +130,7 @@ impl Storage {
 
         // Atomic write: write to temp file then rename
         let temp_path = self.file_path.with_extension("json.tmp");
-        fs::write(&temp_path, json).context("Failed to write temp file")?;
+        write_private_file(&temp_path, json.as_bytes()).context("Failed to write temp file")?;
         fs::rename(&temp_path, &self.file_path).context("Failed to rename temp file")?;
 
         Ok(())
@@ -245,6 +293,16 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     fn test_storage() -> (Storage, TestDir) {
         let temp_dir = TestDir::new();
         let storage = Storage {
@@ -274,6 +332,84 @@ mod tests {
             install_path: None,
             last_checked: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_directory_is_owner_only_when_created_or_tightened() {
+        let temp_dir = TestDir::new();
+        let new_path = temp_dir.path().join("new").join("Obtainintosh");
+        prepare_storage_directory(&new_path).unwrap();
+        assert_eq!(mode(&new_path), PRIVATE_DIRECTORY_MODE);
+
+        let existing_path = temp_dir.path().join("existing");
+        fs::create_dir(&existing_path).unwrap();
+        set_mode(&existing_path, 0o777);
+        prepare_storage_directory(&existing_path).unwrap();
+        assert_eq!(mode(&existing_path), PRIVATE_DIRECTORY_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_tightens_an_existing_apps_file_without_rewriting_it() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        let original = serde_json::to_vec(&data).unwrap();
+        fs::write(&file_path, &original).unwrap();
+        set_mode(&file_path, 0o666);
+
+        Storage::load_from_path(file_path.clone()).unwrap();
+
+        assert_eq!(fs::read(&file_path).unwrap(), original);
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rewrite_replaces_a_loose_apps_file_with_an_owner_only_file() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        fs::write(&file_path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let storage = Storage::load_from_path(file_path.clone()).unwrap();
+        set_mode(&file_path, 0o666);
+
+        storage
+            .update_settings(Settings {
+                github_token: Some("secret".to_string()),
+                gitlab_token: None,
+            })
+            .unwrap();
+
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+        assert!(!file_path.with_extension("json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_atomic_replacement_leaves_an_owner_only_temp_file() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        fs::create_dir(&file_path).unwrap();
+        let storage = Storage {
+            file_path: file_path.clone(),
+            data: Mutex::new(AppData::default()),
+        };
+
+        let error = storage.persist(&AppData::default()).unwrap_err();
+
+        assert_eq!(error.to_string(), "Failed to rename temp file");
+        assert_eq!(
+            mode(&file_path.with_extension("json.tmp")),
+            PRIVATE_FILE_MODE
+        );
     }
 
     #[test]
@@ -314,11 +450,18 @@ mod tests {
         let file_path = temp_dir.path().join("apps.json");
         let malformed = b"{ not valid json";
         fs::write(&file_path, malformed).unwrap();
+        #[cfg(unix)]
+        set_mode(&file_path, 0o666);
 
         let storage = Storage::load_from_path(file_path.clone()).unwrap();
 
         let backup_path = temp_dir.path().join("apps.json.corrupt-backup");
-        assert_eq!(fs::read(backup_path).unwrap(), malformed);
+        assert_eq!(fs::read(&backup_path).unwrap(), malformed);
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&backup_path), PRIVATE_FILE_MODE);
+            assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+        }
         assert!(storage
             .get_all_apps()
             .unwrap()
