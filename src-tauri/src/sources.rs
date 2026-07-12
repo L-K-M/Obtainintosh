@@ -176,10 +176,11 @@ impl GitHubAdapter {
     }
 
     fn find_macos_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
-        #[cfg(target_arch = "aarch64")]
-        let target_arch = MacArch::AppleSilicon;
-        #[cfg(not(target_arch = "aarch64"))]
-        let target_arch = MacArch::Intel;
+        let target_arch = if cfg!(target_arch = "aarch64") {
+            MacArch::AppleSilicon
+        } else {
+            MacArch::Intel
+        };
 
         Self::find_macos_asset_for_arch(assets, target_arch)
     }
