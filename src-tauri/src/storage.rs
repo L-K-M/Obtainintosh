@@ -1,7 +1,7 @@
 use crate::models::{App, AppData, Settings, SourceType};
 use anyhow::{Context, Result};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -62,16 +62,71 @@ fn tighten_storage_file_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(PRIVATE_FILE_MODE);
+struct PrivateTempFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+    cleanup: bool,
+}
 
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
-    file.write_all(contents)
+impl PrivateTempFile {
+    fn create(destination: &Path) -> io::Result<Self> {
+        let file_name = destination.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Storage path has no file name")
+        })?;
+        let mut options = fs::OpenOptions::new();
+        // Exclusive creation atomically rejects pre-existing files and symlinks.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(PRIVATE_FILE_MODE);
+
+        loop {
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            let path = destination.with_file_name(temp_name);
+            match options.open(&path) {
+                Ok(file) => {
+                    let temp = Self {
+                        path,
+                        file: Some(file),
+                        cleanup: true,
+                    };
+                    #[cfg(unix)]
+                    temp.file
+                        .as_ref()
+                        .unwrap()
+                        .set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+                    return Ok(temp);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_all(&mut self, contents: &[u8]) -> io::Result<()> {
+        self.file.as_mut().unwrap().write_all(contents)
+    }
+
+    fn replace(mut self, destination: &Path) -> io::Result<()> {
+        self.file.take();
+        fs::rename(&self.path, destination)?;
+        self.cleanup = false;
+        Ok(())
+    }
+}
+
+impl Drop for PrivateTempFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if self.cleanup {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl Storage {
@@ -128,10 +183,13 @@ impl Storage {
     fn persist(&self, data: &AppData) -> Result<()> {
         let json = serde_json::to_string_pretty(data).context("Failed to serialize data")?;
 
-        // Atomic write: write to temp file then rename
-        let temp_path = self.file_path.with_extension("json.tmp");
-        write_private_file(&temp_path, json.as_bytes()).context("Failed to write temp file")?;
-        fs::rename(&temp_path, &self.file_path).context("Failed to rename temp file")?;
+        // Atomic write: write to a private sibling file then rename.
+        let mut temp =
+            PrivateTempFile::create(&self.file_path).context("Failed to write temp file")?;
+        temp.write_all(json.as_bytes())
+            .context("Failed to write temp file")?;
+        temp.replace(&self.file_path)
+            .context("Failed to rename temp file")?;
 
         Ok(())
     }
@@ -303,6 +361,20 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    fn storage_temp_paths(file_path: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", file_path.file_name().unwrap().to_string_lossy());
+        let mut paths = fs::read_dir(file_path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy();
+                (name.starts_with(&prefix) && name.ends_with(".tmp")).then_some(path)
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
     fn test_storage() -> (Storage, TestDir) {
         let temp_dir = TestDir::new();
         let storage = Storage {
@@ -389,12 +461,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
-        assert!(!file_path.with_extension("json.tmp").exists());
+        assert!(storage_temp_paths(&file_path).is_empty());
+    }
+
+    #[test]
+    fn private_temp_files_are_unique_siblings_and_cleanup_on_drop() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let first = PrivateTempFile::create(&file_path).unwrap();
+        let second = PrivateTempFile::create(&file_path).unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(first_path.parent(), file_path.parent());
+        assert_eq!(second_path.parent(), file_path.parent());
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&first_path), PRIVATE_FILE_MODE);
+            assert_eq!(mode(&second_path), PRIVATE_FILE_MODE);
+        }
+        assert_eq!(storage_temp_paths(&file_path).len(), 2);
+
+        drop(first);
+        drop(second);
+        assert!(storage_temp_paths(&file_path).is_empty());
     }
 
     #[cfg(unix)]
     #[test]
-    fn failed_atomic_replacement_leaves_an_owner_only_temp_file() {
+    fn fixed_temp_symlink_is_not_followed() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let fixed_temp_path = file_path.with_extension("json.tmp");
+        let victim_path = temp_dir.path().join("victim");
+        fs::write(&victim_path, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim_path, &fixed_temp_path).unwrap();
+        let storage = Storage {
+            file_path: file_path.clone(),
+            data: Mutex::new(AppData::default()),
+        };
+
+        storage.persist(&AppData::default()).unwrap();
+
+        assert_eq!(fs::read(&victim_path).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&fixed_temp_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(storage_temp_paths(&file_path), vec![fixed_temp_path]);
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+    }
+
+    #[test]
+    fn failed_atomic_replacement_cleans_unique_temp_file() {
         let temp_dir = TestDir::new();
         let file_path = temp_dir.path().join("apps.json");
         fs::create_dir(&file_path).unwrap();
@@ -405,11 +525,11 @@ mod tests {
 
         let error = storage.persist(&AppData::default()).unwrap_err();
 
-        assert_eq!(error.to_string(), "Failed to rename temp file");
-        assert_eq!(
-            mode(&file_path.with_extension("json.tmp")),
-            PRIVATE_FILE_MODE
+        assert!(
+            error.to_string().contains("rename"),
+            "unexpected error: {error}"
         );
+        assert!(storage_temp_paths(&file_path).is_empty());
     }
 
     #[test]
