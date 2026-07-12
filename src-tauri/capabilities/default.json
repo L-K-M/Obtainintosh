@@ -11,10 +11,22 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         {
+          "url": "http://github.com/*"
+        },
+        {
           "url": "https://github.com/*"
         },
         {
+          "url": "http://www.github.com/*"
+        },
+        {
           "url": "https://www.github.com/*"
+        },
+        {
+          "url": "http://gitlab.com/*"
+        },
+        {
+          "url": "https://gitlab.com/*"
         }
       ]
     },
