@@ -151,18 +151,21 @@ pub async fn check_for_updates(
             Ok(release) => {
                 app.latest_version = Some(release.version);
                 app.last_checked = Some(chrono::Utc::now().to_rfc3339());
-                state
-                    .storage
-                    .update_app(app.clone())
-                    .map_err(|e| e.to_string())?;
-                updated_apps.push(app);
             }
-
             Err(e) => {
                 log::error!("Failed to check updates for {}: {}", app.name, e);
-                updated_apps.push(app);
             }
         }
+
+        // Persist even when the release check failed: the installed-version
+        // re-detection above is fresh either way, and dropping it on a flaky
+        // network would leave the stored state stale until the next
+        // successful check. last_checked stays untouched on failure.
+        state
+            .storage
+            .update_app(app.clone())
+            .map_err(|e| e.to_string())?;
+        updated_apps.push(app);
     }
 
     Ok(updated_apps)
