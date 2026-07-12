@@ -68,12 +68,19 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
+      # The crate lives in src-tauri/ (there is no root Cargo.toml), so every
+      # cargo command must run from there.
       - name: Check formatting
         run: cargo fmt --all --check
+        working-directory: src-tauri
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
 
       - name: Test
         run: cargo test
+        working-directory: src-tauri

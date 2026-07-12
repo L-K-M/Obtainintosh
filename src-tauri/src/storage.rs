@@ -9,7 +9,30 @@ pub struct Storage {
     data: Mutex<AppData>,
 }
 
+/// Obtainintosh tracks itself by default: put the app's own entry at the top
+/// of any data file that hasn't been seeded yet. That is deliberately not just
+/// fresh installs — a data file from a pre-self-tracking version gets the
+/// entry once, on the first launch after upgrading. Runs once per data file:
+/// after the `self_entry_seeded` marker is set, removing the entry sticks. An
+/// existing entry for the same repository (added by hand) is left alone.
+/// Returns whether `data` changed and needs saving — setting the marker is
+/// itself such a change, even when no entry was inserted.
+fn seed_self_entry(data: &mut AppData) -> bool {
+    if data.self_entry_seeded {
+        return false;
+    }
+    if !data.apps.iter().any(crate::updates::is_self_app) {
+        data.apps.insert(0, crate::updates::self_app_entry());
+    }
+    data.self_entry_seeded = true;
+    true
+}
+
 impl Storage {
+    /// Loads (or initializes) the data file. Note the write side effect: the
+    /// one-time self-entry seeding persists to apps.json, so constructing a
+    /// Storage can mutate the real data file — anything building a Storage
+    /// against a user's environment (tests, fixtures) inherits that.
     pub fn new() -> Result<Self> {
         let app_support = dirs::home_dir()
             .context("Failed to get home directory")?
@@ -24,33 +47,36 @@ impl Storage {
         let file_path = app_support.join("apps.json");
 
         // Load existing data or create new
-        let data = if file_path.exists() {
-            let contents = fs::read_to_string(&file_path)
-                .context("Failed to read apps.json")?;
-            serde_json::from_str(&contents)
-                .context("Failed to parse apps.json")?
+        let mut data = if file_path.exists() {
+            let contents = fs::read_to_string(&file_path).context("Failed to read apps.json")?;
+            serde_json::from_str(&contents).context("Failed to parse apps.json")?
         } else {
             AppData::default()
         };
 
-        Ok(Self {
+        let seeded = seed_self_entry(&mut data);
+
+        let storage = Self {
             file_path,
             data: Mutex::new(data),
-        })
+        };
+        if seeded {
+            storage
+                .save()
+                .context("Failed to save the seeded self-entry")?;
+        }
+        Ok(storage)
     }
 
     fn save(&self) -> Result<()> {
         let data = self.data.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*data)
-            .context("Failed to serialize data")?;
-        
+        let json = serde_json::to_string_pretty(&*data).context("Failed to serialize data")?;
+
         // Atomic write: write to temp file then rename
         let temp_path = self.file_path.with_extension("json.tmp");
-        fs::write(&temp_path, json)
-            .context("Failed to write temp file")?;
-        fs::rename(&temp_path, &self.file_path)
-            .context("Failed to rename temp file")?;
-        
+        fs::write(&temp_path, json).context("Failed to write temp file")?;
+        fs::rename(&temp_path, &self.file_path).context("Failed to rename temp file")?;
+
         Ok(())
     }
 
@@ -70,10 +96,13 @@ impl Storage {
             app.id = uuid::Uuid::new_v4().to_string();
         }
 
+        let new_url = crate::sources::normalize_repo_url(&app.source_url);
         let mut data = self.data.lock().unwrap();
-        if data.apps.iter().any(|a| {
-            a.source_url.trim_end_matches('/').eq_ignore_ascii_case(app.source_url.trim_end_matches('/'))
-        }) {
+        if data
+            .apps
+            .iter()
+            .any(|a| crate::sources::normalize_repo_url(&a.source_url) == new_url)
+        {
             anyhow::bail!("This repository is already being tracked");
         }
         data.apps.push(app.clone());
@@ -85,13 +114,13 @@ impl Storage {
 
     pub fn update_app(&self, updated_app: App) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        
+
         if let Some(app) = data.apps.iter_mut().find(|a| a.id == updated_app.id) {
             *app = updated_app;
         } else {
             anyhow::bail!("App not found: {}", updated_app.id);
         }
-        
+
         drop(data);
         self.save()
     }
@@ -100,7 +129,7 @@ impl Storage {
         let mut data = self.data.lock().unwrap();
         data.apps.retain(|app| app.id != id);
         drop(data);
-        
+
         self.save()
     }
 
@@ -113,7 +142,61 @@ impl Storage {
         let mut data = self.data.lock().unwrap();
         data.settings = settings;
         drop(data);
-        
+
         self.save()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{App, SourceType};
+
+    #[test]
+    fn seeds_self_entry_into_fresh_data() {
+        let mut data = AppData::default();
+        assert!(seed_self_entry(&mut data));
+        assert_eq!(data.apps.len(), 1);
+        assert_eq!(data.apps[0].name, "Obtainintosh");
+        assert_eq!(data.apps[0].source_url, crate::updates::self_repo_url());
+        assert!(data.self_entry_seeded);
+    }
+
+    #[test]
+    fn seeding_runs_once_so_removal_sticks() {
+        let mut data = AppData::default();
+        seed_self_entry(&mut data);
+        data.apps.clear(); // the user removes the entry
+        assert!(!seed_self_entry(&mut data)); // later launches leave it removed
+        assert!(data.apps.is_empty());
+    }
+
+    #[test]
+    fn does_not_duplicate_a_manually_added_self_entry() {
+        // Same repo, different spellings: matching is case-insensitive and
+        // ignores a trailing slash or `.git`, like Storage::add_app's dedupe.
+        // Derived from self_repo_url() so these keep exercising the match
+        // paths if OWNER/REPO ever change.
+        let variants = [
+            format!("{}/", crate::updates::self_repo_url().to_uppercase()),
+            format!("{}.git", crate::updates::self_repo_url()),
+        ];
+        for source_url in variants {
+            let mut data = AppData::default();
+            data.apps.push(App {
+                id: "existing".to_string(),
+                name: "Obtainintosh (mine)".to_string(),
+                source_type: SourceType::GitHub,
+                source_url: source_url.clone(),
+                current_version: None,
+                latest_version: None,
+                install_path: None,
+                last_checked: None,
+            });
+            assert!(seed_self_entry(&mut data)); // still marks the file as seeded
+            assert_eq!(data.apps.len(), 1, "duplicated for {}", source_url);
+            assert_eq!(data.apps[0].id, "existing");
+            assert!(data.self_entry_seeded);
+        }
     }
 }

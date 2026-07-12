@@ -4,13 +4,37 @@ use serde::Deserialize;
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
-/// Shared HTTP client for API calls: connection reuse plus a request timeout
-/// so a hung connection can't leave the UI stuck in "Checking..." forever.
+/// Canonical form for "is this the same repository?" comparisons: lowercased
+/// first (so `.GIT` trims like `.git`), query string and fragment dropped
+/// (like `parse_github_url` does), then stripped of a trailing slash and
+/// `.git`, with `http://` folded into `https://` and a `www.` host prefix
+/// dropped. Shared by `Storage::add_app`'s dedupe and `updates::is_self_app`
+/// so the two checks can't drift apart.
+pub(crate) fn normalize_repo_url(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    let base = lower.split(['?', '#']).next().unwrap_or("");
+    let trimmed = base
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"));
+    match rest {
+        Some(rest) => format!("https://{}", rest.strip_prefix("www.").unwrap_or(rest)),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Shared HTTP client for API calls: connection reuse, a request timeout so a
+/// hung connection can't leave the UI stuck in "Checking..." forever, and the
+/// default User-Agent GitHub requires — set here once so every caller gets it.
 pub fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .user_agent(USER_AGENT)
             .build()
             .expect("failed to build HTTP client")
     })
@@ -44,7 +68,6 @@ impl GitHubAdapter {
     fn get(&self, url: &str) -> reqwest::RequestBuilder {
         let mut request = http_client()
             .get(url)
-            .header("User-Agent", USER_AGENT)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
 
@@ -60,7 +83,10 @@ impl GitHubAdapter {
     pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
         let (owner, repo) = Self::parse_github_url(repo_url)?;
 
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            owner, repo
+        );
 
         let response = self
             .get(&api_url)
@@ -82,8 +108,8 @@ impl GitHubAdapter {
         };
 
         // Find macOS-compatible asset
-        let asset = Self::find_macos_asset(&release.assets)
-            .context("No macOS-compatible asset found")?;
+        let asset =
+            Self::find_macos_asset(&release.assets).context("No macOS-compatible asset found")?;
 
         Ok(Release {
             version: clean_version_tag(&release.tag_name),
@@ -96,7 +122,10 @@ impl GitHubAdapter {
     }
 
     async fn get_newest_prerelease(&self, owner: &str, repo: &str) -> Result<GitHubRelease> {
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases?per_page=10", owner, repo);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=10",
+            owner, repo
+        );
 
         let response = self
             .get(&api_url)
@@ -125,15 +154,24 @@ impl GitHubAdapter {
         let mut parts = without_scheme.split('/').filter(|s| !s.is_empty());
 
         let host = parts.next().unwrap_or_default();
-        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com")
+        {
             anyhow::bail!("Invalid GitHub URL: expected github.com/<owner>/<repo>");
         }
 
         // Ignore anything past owner/repo (e.g. /releases, /tree/main) as well as
         // query strings, fragments, and a trailing .git.
         let strip = |s: &str| s.split(['?', '#']).next().unwrap_or("").to_string();
-        let owner = strip(parts.next().context("GitHub URL is missing the repository owner")?);
-        let repo = strip(parts.next().context("GitHub URL is missing the repository name")?);
+        let owner = strip(
+            parts
+                .next()
+                .context("GitHub URL is missing the repository owner")?,
+        );
+        let repo = strip(
+            parts
+                .next()
+                .context("GitHub URL is missing the repository name")?,
+        );
         let repo = repo.trim_end_matches(".git").to_string();
 
         if owner.is_empty() || repo.is_empty() {
@@ -148,7 +186,16 @@ impl GitHubAdapter {
         // Priority order: dmg, pkg, app.tar.gz, tar.gz, zip
         // Note: Generic extensions (zip, tar.gz) require a keyword match to avoid picking up Windows/Linux files
         let extensions = ["dmg", "pkg", "app.tar.gz", "tar.gz", "zip"];
-        let macos_keywords = ["mac", "macos", "darwin", "osx", "universal", "arm64", "aarch64", "x86_64"];
+        let macos_keywords = [
+            "mac",
+            "macos",
+            "darwin",
+            "osx",
+            "universal",
+            "arm64",
+            "aarch64",
+            "x86_64",
+        ];
 
         // Architecture preference: universal first, then the native architecture,
         // then anything else that still looks like a macOS build.
@@ -190,9 +237,10 @@ impl GitHubAdapter {
             // We don't want to accidentally pick up a windows zip just because it's the only zip
             let is_generic = ["zip", "tar.gz"].contains(ext);
             if !is_generic {
-                if let Some(asset) = assets.iter().find(|a| {
-                    a.name.to_lowercase().ends_with(&suffix)
-                }) {
+                if let Some(asset) = assets
+                    .iter()
+                    .find(|a| a.name.to_lowercase().ends_with(&suffix))
+                {
                     log::debug!("Selected asset (extension match): {}", asset.name);
                     return Some(asset);
                 }
@@ -255,10 +303,34 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_repo_url() {
+        for url in [
+            "https://github.com/Owner/Repo",
+            "https://GitHub.com/owner/repo/",
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo.git/",
+            "https://github.com/owner/repo.GIT",
+            "http://github.com/owner/repo",
+            "https://www.github.com/owner/repo",
+            "http://WWW.github.com/owner/repo.Git/",
+            "https://github.com/owner/repo?tab=readme",
+            "https://github.com/owner/repo/#readme",
+        ] {
+            assert_eq!(
+                super::normalize_repo_url(url),
+                "https://github.com/owner/repo",
+                "normalizing {}",
+                url
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_github_url_extra_segments() {
         // URLs deeper than the repo root should still resolve to owner/repo
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo/releases/latest").unwrap(),
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo/releases/latest")
+                .unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(

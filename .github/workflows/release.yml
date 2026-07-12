@@ -4,12 +4,25 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Re-release an existing tag whose original run failed, without deleting and
+  # re-pushing the tag. Runs the workflow file from the default branch but
+  # builds the tagged commit.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, e.g. v1.0.0'
+        required: true
+        type: string
 
 permissions:
   contents: write # create the GitHub Release and upload assets
 
 env:
   CARGO_TERM_COLOR: always
+  # The tag being released: the pushed tag, or the workflow_dispatch input.
+  # Route ALL tag logic through this — on dispatched runs github.ref /
+  # github.ref_name are the branch the workflow ran from, not the tag.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -19,26 +32,83 @@ jobs:
     name: Create draft release
     runs-on: ubuntu-22.04
     outputs:
-      release_id: ${{ steps.create.outputs.result }}
+      release_id: ${{ steps.create.outputs.release_id }}
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Create draft release
+      - name: Create or reuse draft release
         id: create
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const tag = context.ref.replace('refs/tags/', '');
-            const { data } = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              name: `Obtainintosh ${tag}`,
-              draft: true,
-              prerelease: tag.includes('-'),
-              generate_release_notes: true,
-            });
-            return data.id;
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Only accept tags shaped like the push trigger (v*.*.*), ending
+          # either at the patch digit or in a -prerelease suffix — the same
+          # dash the prerelease check below keys on. RELEASE_TAG reaches this
+          # script as a real environment variable (the env: indirection
+          # above), so shell expansion treats it as data — this check is
+          # defense-in-depth and a clearer error for malformed dispatch
+          # inputs, not the injection barrier itself.
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+($|-) ]]; then
+            echo "::error::Tag '${RELEASE_TAG}' does not match the release tag format v<major>.<minor>.<patch>"
+            exit 1
+          fi
+
+          # Fail fast with a clear message when the tag doesn't exist (e.g. a
+          # typo'd workflow_dispatch input) instead of letting every build job
+          # die at checkout with a cryptic error.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag '${RELEASE_TAG}' does not exist in ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
+          # Reuse an existing release for this tag — draft or published — so a
+          # re-dispatch after a partial failure continues into the same release
+          # instead of creating a duplicate draft (or 422ing on a published
+          # one). Two lookups on purpose: `releases/tags/<tag>` is O(1) but
+          # only ever returns a *published* release, so fall back to scanning
+          # the paginated release list — the only way to find a draft left
+          # behind by a failed earlier run.
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            --jq '.id' 2>/dev/null || true)"
+          if [ -n "$release_id" ]; then
+            # The tag lookup only returns published releases, and this rebuild
+            # is about to delete-and-replace its assets one by one. Flip the
+            # release back to draft so nobody downloads from a half-replaced
+            # asset list; publish-release makes it public again once every
+            # build job has uploaded.
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --method PATCH --field draft=true --silent
+            echo "Re-drafted published release ${release_id} while its assets rebuild"
+          fi
+          if [ -z "$release_id" ]; then
+            # --paginate emits one JSON array per page; jq handles the
+            # concatenated arrays and head takes the first match, if any.
+            # Worst case (tag has no release at all) this walks every page,
+            # which is fine for a workflow that runs once per release.
+            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
+              | jq -r --arg tag "$RELEASE_TAG" \
+                  '.[] | select(.tag_name == $tag) | .id' \
+              | head -n1)"
+          fi
+          if [ -n "$release_id" ]; then
+            echo "Reusing existing release ${release_id} for ${RELEASE_TAG}"
+          else
+            prerelease=false
+            case "$RELEASE_TAG" in
+              *-*) prerelease=true ;; # mirrors the previous `tag.includes('-')`
+            esac
+            # -F/--field (not -f/--raw-field) for draft/prerelease/notes:
+            # gh coerces "true"/"false" into JSON booleans; --raw-field would
+            # send the string "true" and the API would reject it.
+            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+              --method POST \
+              --raw-field tag_name="$RELEASE_TAG" \
+              --raw-field name="Obtainintosh ${RELEASE_TAG}" \
+              --field draft=true \
+              --field prerelease="$prerelease" \
+              --field generate_release_notes=true \
+              --jq '.id')"
+            echo "Created draft release ${release_id} for ${RELEASE_TAG}"
+          fi
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # Desktop bundles. Obtainintosh targets Mac OS X (.dmg-only bundle), so the
@@ -59,7 +129,11 @@ jobs:
             rust-targets: x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
+      # Explicit ref so workflow_dispatch re-releases build the tagged commit
+      # rather than the default branch. On tag pushes this matches github.ref.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Node
         uses: actions/setup-node@v5
@@ -110,6 +184,9 @@ jobs:
             fi
           done
 
+      # tauri-action deletes a same-name asset before uploading its own, so
+      # re-dispatching into a release that already has assets from a partial
+      # earlier run is safe — uploads replace rather than 422 on duplicates.
       - name: Build and upload Tauri bundles
         uses: tauri-apps/tauri-action@v0
         env:
@@ -127,12 +204,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Mark release as published
-        uses: actions/github-script@v8
-        with:
-          script: |
-            await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: ${{ needs.create-release.outputs.release_id }},
-              draft: false,
-            });
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            --method PATCH \
+            --field draft=false

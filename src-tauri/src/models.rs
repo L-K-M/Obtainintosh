@@ -47,6 +47,11 @@ pub struct SystemColors {
 pub struct AppData {
     pub apps: Vec<App>,
     pub settings: Settings,
+    /// One-shot marker: Obtainintosh's own entry has been seeded into this data
+    /// file. Once set, a user who removes the entry keeps it removed — it is
+    /// never re-added on later launches.
+    #[serde(default)]
+    pub self_entry_seeded: bool,
 }
 
 impl Default for AppData {
@@ -57,8 +62,7 @@ impl Default for AppData {
                 github_token: None,
                 gitlab_token: None,
             },
+            self_entry_seeded: false,
         }
     }
 }
-
-

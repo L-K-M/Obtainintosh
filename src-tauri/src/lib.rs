@@ -1,9 +1,9 @@
 mod commands;
+mod installer;
 mod models;
-mod system_colors;
 mod sources;
 mod storage;
-mod installer;
+mod system_colors;
 mod updates;
 
 use commands::AppState;
@@ -26,9 +26,12 @@ pub fn run() {
         .manage(app_state)
         .setup(|app| {
             // Create custom menu items
-            let add_app = MenuItem::with_id(app, "add_app", "Add App...", true, Some("CmdOrCtrl+N"))?;
-            let check_all = MenuItem::with_id(app, "check_all", "Check All", true, Some("CmdOrCtrl+R"))?;
-            let settings = MenuItem::with_id(app, "settings", "Settings", true, Some("CmdOrCtrl+,"))?;
+            let add_app =
+                MenuItem::with_id(app, "add_app", "Add App...", true, Some("CmdOrCtrl+N"))?;
+            let check_all =
+                MenuItem::with_id(app, "check_all", "Check All", true, Some("CmdOrCtrl+R"))?;
+            let settings =
+                MenuItem::with_id(app, "settings", "Settings", true, Some("CmdOrCtrl+,"))?;
 
             // Create custom About menu item (instead of PredefinedMenuItem::about)
             let about = MenuItem::with_id(app, "about", "About Obtainintosh", true, None::<&str>)?;
@@ -91,30 +94,28 @@ pub fn run() {
 
             Ok(())
         })
-        .on_menu_event(|app, event| {
-            match event.id().as_ref() {
-                "add_app" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.emit("menu-add-app", ());
-                    }
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "add_app" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("menu-add-app", ());
                 }
-                "check_all" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.emit("menu-check-all", ());
-                    }
-                }
-                "settings" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.emit("menu-settings", ());
-                    }
-                }
-                "about" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.emit("menu-about", ());
-                    }
-                }
-                _ => {}
             }
+            "check_all" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("menu-check-all", ());
+                }
+            }
+            "settings" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("menu-settings", ());
+                }
+            }
+            "about" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("menu-about", ());
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_all_apps,
@@ -132,4 +133,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
