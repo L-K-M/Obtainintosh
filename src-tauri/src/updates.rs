@@ -9,11 +9,43 @@
 //! `updates::check_for_update` in the Tauri `invoke_handler`, and add the frontend
 //! `updateChecker.ts` + `UpdateNotice.svelte`.
 
+use crate::models::{App, SourceType};
 use serde::{Deserialize, Serialize};
 
 /// The GitHub repository whose releases are checked.
 const OWNER: &str = "L-K-M";
 const REPO: &str = "Obtainintosh";
+
+/// Canonical https URL of Obtainintosh's own repository.
+pub(crate) fn self_repo_url() -> String {
+    format!("https://github.com/{OWNER}/{REPO}")
+}
+
+/// The entry Obtainintosh seeds into its own tracked-apps list so that, by
+/// default, it keeps itself up to date like any other app. `current_version`
+/// starts at the running version so the list reads sensibly before the first
+/// update check re-detects it.
+pub(crate) fn self_app_entry() -> App {
+    App {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: REPO.to_string(),
+        source_type: SourceType::GitHub,
+        source_url: self_repo_url(),
+        current_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        latest_version: None,
+        install_path: None,
+        last_checked: None,
+    }
+}
+
+/// Whether a tracked app is Obtainintosh itself — the seeded self-entry, or the
+/// same repository added by hand (matched like `Storage::add_app`'s dedupe:
+/// case-insensitively, ignoring a trailing slash).
+pub(crate) fn is_self_app(app: &App) -> bool {
+    app.source_url
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(&self_repo_url())
+}
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -128,7 +160,18 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{is_newer, is_self_app, self_app_entry};
+
+    #[test]
+    fn self_entry_is_recognized_as_self() {
+        let entry = self_app_entry();
+        assert!(is_self_app(&entry));
+        assert_eq!(entry.name, "Obtainintosh");
+        assert_eq!(
+            entry.current_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     #[test]
     fn compares_versions_numerically() {

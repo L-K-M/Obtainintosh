@@ -9,6 +9,22 @@ pub struct Storage {
     data: Mutex<AppData>,
 }
 
+/// Obtainintosh tracks itself by default: put the app's own entry at the top of
+/// fresh (or pre-seeding) data files. Runs once per data file — after the
+/// `self_entry_seeded` marker is set, removing the entry sticks. An existing
+/// entry for the same repository (added by hand) is left alone. Returns whether
+/// `data` changed and needs saving.
+fn seed_self_entry(data: &mut AppData) -> bool {
+    if data.self_entry_seeded {
+        return false;
+    }
+    if !data.apps.iter().any(crate::updates::is_self_app) {
+        data.apps.insert(0, crate::updates::self_app_entry());
+    }
+    data.self_entry_seeded = true;
+    true
+}
+
 impl Storage {
     pub fn new() -> Result<Self> {
         let app_support = dirs::home_dir()
@@ -24,17 +40,23 @@ impl Storage {
         let file_path = app_support.join("apps.json");
 
         // Load existing data or create new
-        let data = if file_path.exists() {
+        let mut data = if file_path.exists() {
             let contents = fs::read_to_string(&file_path).context("Failed to read apps.json")?;
             serde_json::from_str(&contents).context("Failed to parse apps.json")?
         } else {
             AppData::default()
         };
 
-        Ok(Self {
+        let seeded = seed_self_entry(&mut data);
+
+        let storage = Self {
             file_path,
             data: Mutex::new(data),
-        })
+        };
+        if seeded {
+            storage.save()?;
+        }
+        Ok(storage)
     }
 
     fn save(&self) -> Result<()> {
@@ -112,5 +134,51 @@ impl Storage {
         drop(data);
 
         self.save()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{App, SourceType};
+
+    #[test]
+    fn seeds_self_entry_into_fresh_data() {
+        let mut data = AppData::default();
+        assert!(seed_self_entry(&mut data));
+        assert_eq!(data.apps.len(), 1);
+        assert_eq!(data.apps[0].name, "Obtainintosh");
+        assert_eq!(data.apps[0].source_url, crate::updates::self_repo_url());
+        assert!(data.self_entry_seeded);
+    }
+
+    #[test]
+    fn seeding_runs_once_so_removal_sticks() {
+        let mut data = AppData::default();
+        seed_self_entry(&mut data);
+        data.apps.clear(); // the user removes the entry
+        assert!(!seed_self_entry(&mut data)); // later launches leave it removed
+        assert!(data.apps.is_empty());
+    }
+
+    #[test]
+    fn does_not_duplicate_a_manually_added_self_entry() {
+        let mut data = AppData::default();
+        data.apps.push(App {
+            id: "existing".to_string(),
+            name: "Obtainintosh (mine)".to_string(),
+            source_type: SourceType::GitHub,
+            // Same repo, different spelling: dedupe is case-insensitive and
+            // ignores a trailing slash, like Storage::add_app.
+            source_url: "https://GitHub.com/l-k-m/obtainintosh/".to_string(),
+            current_version: None,
+            latest_version: None,
+            install_path: None,
+            last_checked: None,
+        });
+        assert!(seed_self_entry(&mut data)); // still marks the file as seeded
+        assert_eq!(data.apps.len(), 1);
+        assert_eq!(data.apps[0].id, "existing");
+        assert!(data.self_entry_seeded);
     }
 }
