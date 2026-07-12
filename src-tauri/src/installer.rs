@@ -1,51 +1,96 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+struct IndexedApplicationDirectory {
+    path: PathBuf,
+    apps_by_name: HashMap<String, Vec<PathBuf>>,
+}
+
+pub(crate) struct InstalledAppIndex {
+    directories: Vec<IndexedApplicationDirectory>,
+}
+
+impl InstalledAppIndex {
+    pub(crate) fn scan() -> Self {
+        let directories = application_directories()
+            .into_iter()
+            .map(|path| {
+                let entries = std::fs::read_dir(&path)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()));
+                index_application_directory(path, entries)
+            })
+            .collect();
+
+        Self { directories }
+    }
+
+    pub(crate) fn detect(&self, app_name: &str) -> Option<(String, String)> {
+        log::debug!("Searching app index for: {}", app_name);
+
+        for path in self.candidate_paths(app_name) {
+            log::debug!("Trying indexed path: {}", path.display());
+            let path_string = path.to_string_lossy().to_string();
+            if let Some(version) = get_app_version(&path_string) {
+                log::debug!("Found indexed app version: {}", version);
+                return Some((path_string, version));
+            }
+        }
+
+        log::debug!("No indexed match found for {}", app_name);
+        None
+    }
+
+    fn candidate_paths(&self, app_name: &str) -> Vec<PathBuf> {
+        let normalized_name = app_name.to_lowercase();
+        let mut paths = Vec::new();
+
+        for directory in &self.directories {
+            // Preserve the existing exact-before-case-insensitive lookup order
+            // within each application directory.
+            paths.push(directory.path.join(format!("{app_name}.app")));
+            if let Some(matches) = directory.apps_by_name.get(&normalized_name) {
+                paths.extend(matches.iter().cloned());
+            }
+        }
+
+        paths
+    }
+}
 
 /// Detect if an app is installed in /Applications or ~/Applications and get its version
 pub fn detect_installed_app(app_name: &str) -> Option<(String, String)> {
-    log::debug!("Searching for app: {}", app_name);
+    InstalledAppIndex::scan().detect(app_name)
+}
 
-    let mut app_dirs = vec!["/Applications".to_string()];
+fn application_directories() -> Vec<PathBuf> {
+    let mut directories = vec![PathBuf::from("/Applications")];
     if let Some(home) = dirs::home_dir() {
-        app_dirs.push(home.join("Applications").to_string_lossy().to_string());
+        directories.push(home.join("Applications"));
     }
+    directories
+}
 
-    for dir in &app_dirs {
-        // Try exact match first
-        let exact_path = format!("{}/{}.app", dir, app_name);
-        log::debug!("Trying exact path: {}", exact_path);
-
-        if let Some(version) = get_app_version(&exact_path) {
-            log::debug!("Found via exact match! Version: {}", version);
-            return Some((exact_path, version));
+fn index_application_directory(
+    path: PathBuf,
+    entries: impl IntoIterator<Item = PathBuf>,
+) -> IndexedApplicationDirectory {
+    let mut apps_by_name: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for entry in entries {
+        if entry.extension().and_then(|extension| extension.to_str()) != Some("app") {
+            continue;
         }
-
-        // Try case-insensitive search
-        log::debug!(
-            "Exact match failed, trying case-insensitive search in {}",
-            dir
-        );
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("app") {
-                    if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                        // Case-insensitive comparison
-                        if file_name.to_lowercase() == app_name.to_lowercase() {
-                            log::debug!("Match found: {}", file_name);
-                            if let Some(version) = get_app_version(&path.to_string_lossy()) {
-                                log::debug!("Version found: {}", version);
-                                return Some((path.to_string_lossy().to_string(), version));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(name) = entry.file_stem().and_then(|name| name.to_str()) {
+            apps_by_name
+                .entry(name.to_lowercase())
+                .or_default()
+                .push(entry);
         }
     }
 
-    log::debug!("No match found for {}", app_name);
-    None
+    IndexedApplicationDirectory { path, apps_by_name }
 }
 
 /// Locate the .app bundle the current process runs from and read its version,
@@ -102,4 +147,61 @@ fn get_app_version(app_path: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_matches_preserve_directory_and_exact_match_precedence() {
+        let system = PathBuf::from("/Applications");
+        let user = PathBuf::from("/Users/test/Applications");
+        let index = InstalledAppIndex {
+            directories: vec![
+                index_application_directory(
+                    system.clone(),
+                    [
+                        system.join("example.app"),
+                        system.join("Example.app"),
+                        system.join("EXAMPLE.app"),
+                        system.join("Example.APP"),
+                        system.join("Example.txt"),
+                    ],
+                ),
+                index_application_directory(user.clone(), [user.join("example.app")]),
+            ],
+        };
+
+        assert_eq!(
+            index.candidate_paths("Example"),
+            vec![
+                system.join("Example.app"),
+                system.join("example.app"),
+                system.join("Example.app"),
+                system.join("EXAMPLE.app"),
+                user.join("Example.app"),
+                user.join("example.app"),
+            ]
+        );
+    }
+
+    #[test]
+    fn indexed_matches_are_case_insensitive_but_name_specific() {
+        let directory = PathBuf::from("/Applications");
+        let index = InstalledAppIndex {
+            directories: vec![index_application_directory(
+                directory.clone(),
+                [
+                    directory.join("Preview.app"),
+                    directory.join("Previewer.app"),
+                ],
+            )],
+        };
+
+        assert_eq!(
+            index.candidate_paths("preview"),
+            vec![directory.join("preview.app"), directory.join("Preview.app")]
+        );
+    }
 }

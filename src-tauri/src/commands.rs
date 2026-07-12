@@ -1,10 +1,13 @@
 use crate::models::{
-    bounded_check_message, App, CheckAttempt, CheckAttemptState, Settings, SourceType, SystemColors,
+    bounded_check_message, App, CheckAttempt, CheckAttemptState, Release, Settings, SourceType,
+    SystemColors,
 };
 use crate::sources::GitHubAdapter;
 use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
 use crate::system_colors;
 use anyhow::{Context, Result};
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +19,7 @@ pub struct AppState {
 }
 
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const GITHUB_CHECK_CONCURRENCY: usize = 4;
 
 struct InFlightDownloadGuard {
     active_download: Arc<Mutex<Option<String>>>,
@@ -78,6 +82,19 @@ pub struct CheckOutcome {
     message: Option<String>,
 }
 
+struct PendingCheck {
+    app: App,
+    current_version: Option<String>,
+    install_path: Option<String>,
+}
+
+struct CompletedCheck {
+    pending: PendingCheck,
+    result: Result<Release>,
+    failure_state: CheckAttemptState,
+    attempted_at: String,
+}
+
 fn check_outcome(app: &App, state: CheckOutcomeState, message: Option<String>) -> CheckOutcome {
     CheckOutcome {
         app_id: app.id.clone(),
@@ -111,12 +128,17 @@ pub async fn add_app(url: String, name: String, state: State<'_, AppState>) -> R
     let source_type = crate::sources::validate_new_source(&url).map_err(|e| e.to_string())?;
 
     // Check if app is already installed
-    let (current_version, install_path) =
-        if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
-            (Some(version), Some(path))
-        } else {
-            (None, None)
-        };
+    let detection_name = name.clone();
+    let installed = tokio::task::spawn_blocking(move || {
+        crate::installer::detect_installed_app(&detection_name)
+    })
+    .await
+    .map_err(|error| format!("Installed-app detection failed: {error}"))?;
+    let (current_version, install_path) = if let Some((path, version)) = installed {
+        (Some(version), Some(path))
+    } else {
+        (None, None)
+    };
 
     let app = App {
         id: String::new(),
@@ -147,7 +169,27 @@ pub async fn update_app(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<App, String> {
-    // Get existing app
+    let app = state
+        .storage
+        .get_app(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "App not found".to_string())?;
+
+    let installed = if app.name != name {
+        let detection_name = name.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::installer::detect_installed_app(&detection_name)
+            })
+            .await
+            .map_err(|error| format!("Installed-app detection failed: {error}"))?,
+        )
+    } else {
+        None
+    };
+
+    // Detection yields to other commands, so edit the latest stored record
+    // rather than overwriting a check result with the earlier snapshot.
     let mut app = state
         .storage
         .get_app(&id)
@@ -178,7 +220,7 @@ pub async fn update_app(
     app.source_url = source_url;
 
     if app.name != name {
-        match crate::installer::detect_installed_app(&name) {
+        match installed.expect("renaming an app must run installed-app detection") {
             Some((path, version)) => {
                 app.current_version = Some(version);
                 app.install_path = Some(path);
@@ -204,6 +246,7 @@ pub async fn check_for_updates(
     app_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<CheckOutcome>, String> {
+    let is_batch = app_id.is_none();
     let apps = if let Some(id) = app_id {
         vec![state
             .storage
@@ -215,44 +258,58 @@ pub async fn check_for_updates(
     };
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    let mut outcomes = Vec::new();
-
-    for app in apps {
-        // Re-detect installed version; clear stale state if the app was uninstalled
-        let (current_version, install_path) =
-            match crate::installer::detect_installed_app(&app.name) {
-                Some((path, version)) => (Some(version), Some(path)),
-                // Obtainintosh itself is running right now, so it always has a
-                // current version — even without an /Applications install. Prefer
-                // the bundle the process runs from (stays accurate if that bundle
-                // is replaced on disk by an update); the compiled-in version is
-                // the fallback for dev builds outside a bundle.
-                None if crate::updates::is_self_app(&app) => {
-                    let (path, version) = match crate::installer::detect_running_bundle() {
-                        Some((path, version)) => (Some(path), version),
-                        None => (None, env!("CARGO_PKG_VERSION").to_string()),
-                    };
-                    (Some(version), path)
+    let detected = detect_apps_for_check(apps.clone(), is_batch).await?;
+    let pending_checks =
+        apps.into_iter()
+            .zip(detected)
+            .map(|(app, (current_version, install_path))| PendingCheck {
+                app,
+                current_version,
+                install_path,
+            });
+    let github_token = settings.github_token;
+    let completed = collect_bounded_ordered(
+        pending_checks,
+        GITHUB_CHECK_CONCURRENCY,
+        |pending| {
+            let adapter = GitHubAdapter::new(github_token.clone());
+            async move {
+                let (result, failure_state) = match pending.app.source_type {
+                    SourceType::GitHub => (
+                        adapter.get_latest_release(&pending.app.source_url).await,
+                        CheckAttemptState::Failed,
+                    ),
+                    SourceType::GitLab => (
+                        Err(anyhow::anyhow!(
+                            "This existing GitLab source is unsupported; only GitHub repositories can be checked"
+                        )),
+                        CheckAttemptState::Unsupported,
+                    ),
+                };
+                CompletedCheck {
+                    pending,
+                    result,
+                    failure_state,
+                    attempted_at: chrono::Utc::now().to_rfc3339(),
                 }
-                None => (None, None),
-            };
-
-        let (result, failure_state) = match app.source_type {
-            SourceType::GitHub => {
-                let adapter = GitHubAdapter::new(settings.github_token.clone());
-                (
-                    adapter.get_latest_release(&app.source_url).await,
-                    CheckAttemptState::Failed,
-                )
             }
-            SourceType::GitLab => (
-                Err(anyhow::anyhow!(
-                    "This existing GitLab source is unsupported; only GitHub repositories can be checked"
-                )),
-                CheckAttemptState::Unsupported,
-            ),
-        };
-        let attempted_at = chrono::Utc::now().to_rfc3339();
+        },
+    )
+    .await;
+    let mut outcomes = Vec::with_capacity(completed.len());
+
+    for completed in completed {
+        let CompletedCheck {
+            pending,
+            result,
+            failure_state,
+            attempted_at,
+        } = completed;
+        let PendingCheck {
+            app,
+            current_version,
+            install_path,
+        } = pending;
 
         match result {
             Ok(release) => {
@@ -318,6 +375,78 @@ pub async fn check_for_updates(
     }
 
     Ok(outcomes)
+}
+
+async fn detect_apps_for_check(
+    apps: Vec<App>,
+    use_shared_index: bool,
+) -> Result<Vec<(Option<String>, Option<String>)>, String> {
+    tokio::task::spawn_blocking(move || {
+        let index = use_shared_index.then(crate::installer::InstalledAppIndex::scan);
+        apps.iter()
+            .map(|app| {
+                let installed = match &index {
+                    Some(index) => index.detect(&app.name),
+                    None => crate::installer::detect_installed_app(&app.name),
+                };
+                match installed {
+                    Some((path, version)) => (Some(version), Some(path)),
+                    // Obtainintosh itself is running right now, so it always has a
+                    // current version, even without an /Applications install.
+                    None if crate::updates::is_self_app(app) => {
+                        let (path, version) = match crate::installer::detect_running_bundle() {
+                            Some((path, version)) => (Some(path), version),
+                            None => (None, env!("CARGO_PKG_VERSION").to_string()),
+                        };
+                        (Some(version), path)
+                    }
+                    None => (None, None),
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("Installed-app detection failed: {error}"))
+}
+
+async fn collect_bounded_ordered<I, F, Fut, T>(inputs: I, limit: usize, mut operation: F) -> Vec<T>
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> Fut,
+    Fut: Future<Output = T>,
+{
+    assert!(limit > 0, "bounded operation limit must be positive");
+
+    let mut inputs = inputs.into_iter().enumerate();
+    let mut in_flight = FuturesUnordered::new();
+    let mut results = Vec::new();
+
+    for _ in 0..limit {
+        let Some((index, input)) = inputs.next() else {
+            break;
+        };
+        results.push(None);
+        let future = operation(input);
+        in_flight.push(indexed_future(index, future));
+    }
+
+    while let Some((index, result)) = in_flight.next().await {
+        results[index] = Some(result);
+        if let Some((next_index, input)) = inputs.next() {
+            results.push(None);
+            let future = operation(input);
+            in_flight.push(indexed_future(next_index, future));
+        }
+    }
+
+    results
+        .into_iter()
+        .map(|result| result.expect("every bounded operation must complete"))
+        .collect()
+}
+
+async fn indexed_future<Fut: Future>(index: usize, future: Fut) -> (usize, Fut::Output) {
+    (index, future.await)
 }
 
 #[tauri::command]
@@ -673,6 +802,7 @@ fn reveal_in_finder(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn download_paths_are_unique_and_keep_asset_names_inside_the_operation_directory() {
@@ -722,5 +852,27 @@ mod tests {
 
         drop(first);
         assert!(InFlightDownloadGuard::acquire("App Two (app-2)", active_download).is_ok());
+    }
+
+    #[tokio::test]
+    async fn bounded_operations_respect_the_limit_and_return_input_order() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let results = collect_bounded_ordered(0_u64..8, 2, |input| {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            async move {
+                let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(now_active, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(8 - input)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                input
+            }
+        })
+        .await;
+
+        assert_eq!(results, (0_u64..8).collect::<Vec<_>>());
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 }
