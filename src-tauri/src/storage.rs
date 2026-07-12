@@ -254,7 +254,10 @@ impl Storage {
             return Ok(PendingResultApplication::AppRemoved);
         };
         let current = &data.apps[index];
-        if current.name != snapshot.name || !same_source_identity(current, snapshot) {
+        if current.name != snapshot.name
+            || !same_source_identity(current, snapshot)
+            || !same_check_metadata(current, snapshot)
+        {
             return Ok(PendingResultApplication::DependenciesChanged);
         }
 
@@ -284,10 +287,7 @@ impl Storage {
             return Ok(PendingResultApplication::AppRemoved);
         };
         let current = &data.apps[index];
-        if !same_source_identity(current, snapshot)
-            || current.latest_version != snapshot.latest_version
-            || current.last_checked != snapshot.last_checked
-        {
+        if !same_source_identity(current, snapshot) || !same_check_metadata(current, snapshot) {
             return Ok(PendingResultApplication::DependenciesChanged);
         }
 
@@ -353,6 +353,12 @@ fn same_source_identity(left: &App, right: &App) -> bool {
         }
         SourceType::GitLab => left.source_url == right.source_url,
     }
+}
+
+fn same_check_metadata(left: &App, right: &App) -> bool {
+    left.latest_version == right.latest_version
+        && left.last_checked == right.last_checked
+        && left.last_check_attempt == right.last_check_attempt
 }
 
 #[cfg(test)]
@@ -842,9 +848,10 @@ mod tests {
                 },
             )
             .unwrap();
+        let failure_snapshot = storage.get_app("attempts").unwrap().unwrap();
         storage
             .apply_check_result(
-                &snapshot,
+                &failure_snapshot,
                 CheckOwnedUpdate {
                     current_version: Some("1.0.0".to_string()),
                     install_path: Some("/Applications/Attempts.app".to_string()),
@@ -868,9 +875,10 @@ mod tests {
             Some("GitHub was unavailable")
         );
 
+        let success_snapshot = storage.get_app("attempts").unwrap().unwrap();
         storage
             .apply_check_result(
-                &snapshot,
+                &success_snapshot,
                 CheckOwnedUpdate {
                     current_version: Some("1.0.0".to_string()),
                     install_path: Some("/Applications/Attempts.app".to_string()),
@@ -886,6 +894,62 @@ mod tests {
         let succeeded_attempt = succeeded.last_check_attempt.unwrap();
         assert_eq!(succeeded_attempt.state, CheckAttemptState::Succeeded);
         assert_eq!(succeeded_attempt.message, None);
+    }
+
+    #[test]
+    fn older_overlapping_check_cannot_overwrite_a_newer_completion() {
+        let (storage, _temp_dir) = test_storage();
+        storage
+            .add_app(app(
+                "overlap",
+                SourceType::GitHub,
+                "https://github.com/owner/overlap",
+            ))
+            .unwrap();
+        let older_snapshot = storage.get_app("overlap").unwrap().unwrap();
+        let newer_snapshot = older_snapshot.clone();
+
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &newer_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: Some("2.0.0".to_string()),
+                        install_path: Some("/Applications/Overlap.app".to_string()),
+                        latest_version: Some("3.0.0".to_string()),
+                        attempt: CheckAttempt::succeeded("newer-completion".to_string()),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::Applied
+        );
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &older_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: Some("1.0.0".to_string()),
+                        install_path: Some("/stale/Overlap.app".to_string()),
+                        latest_version: Some("2.0.0".to_string()),
+                        attempt: CheckAttempt::succeeded("older-completion".to_string()),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::DependenciesChanged
+        );
+
+        let current = storage.get_app("overlap").unwrap().unwrap();
+        assert_eq!(current.current_version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            current.install_path.as_deref(),
+            Some("/Applications/Overlap.app")
+        );
+        assert_eq!(current.latest_version.as_deref(), Some("3.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("newer-completion"));
+        assert_eq!(
+            current.last_check_attempt.unwrap().attempted_at,
+            "newer-completion"
+        );
     }
 
     #[test]
@@ -994,6 +1058,58 @@ mod tests {
         assert_eq!(current.latest_version.as_deref(), Some("2.0.0"));
         assert_eq!(current.last_checked.as_deref(), Some("v2-check"));
         assert_eq!(current.last_check_attempt.unwrap().attempted_at, "v2-check");
+    }
+
+    #[test]
+    fn download_cannot_hide_a_failed_check_that_completed_during_transfer() {
+        let (storage, _temp_dir) = test_storage();
+        let mut tracked = app(
+            "download",
+            SourceType::GitHub,
+            "https://github.com/owner/download",
+        );
+        tracked.latest_version = Some("1.0.0".to_string());
+        tracked.last_checked = Some("successful-check".to_string());
+        tracked.last_check_attempt = Some(CheckAttempt::succeeded("successful-check".to_string()));
+        storage.add_app(tracked).unwrap();
+        let download_snapshot = storage.get_app("download").unwrap().unwrap();
+
+        assert_eq!(
+            storage
+                .apply_check_result(
+                    &download_snapshot,
+                    CheckOwnedUpdate {
+                        current_version: None,
+                        install_path: None,
+                        latest_version: None,
+                        attempt: CheckAttempt::unsuccessful(
+                            "failed-check".to_string(),
+                            CheckAttemptState::Failed,
+                            "GitHub was unavailable",
+                        ),
+                    },
+                )
+                .unwrap(),
+            PendingResultApplication::Applied
+        );
+        assert_eq!(
+            storage
+                .apply_download_release(
+                    &download_snapshot,
+                    "1.0.0".to_string(),
+                    "download-finished".to_string(),
+                )
+                .unwrap(),
+            PendingResultApplication::DependenciesChanged
+        );
+
+        let current = storage.get_app("download").unwrap().unwrap();
+        assert_eq!(current.latest_version.as_deref(), Some("1.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("successful-check"));
+        let attempt = current.last_check_attempt.unwrap();
+        assert_eq!(attempt.attempted_at, "failed-check");
+        assert_eq!(attempt.state, CheckAttemptState::Failed);
+        assert_eq!(attempt.message.as_deref(), Some("GitHub was unavailable"));
     }
 
     #[test]
