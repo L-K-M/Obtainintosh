@@ -18,13 +18,21 @@ process.stdout.write(version);
 NODE
 }
 
+valid_tag() {
+  node - "$1" <<'NODE'
+const tag = process.argv[2];
+const semverTag = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+process.exit(semverTag.test(tag) ? 0 : 1);
+NODE
+}
+
 package_version="$(json_version package.json package)" || {
   echo "error: could not read version from package.json" >&2
   exit 1
 }
 tag="${1:-v${package_version}}"
-if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "error: release tag must match vX.Y.Z (got '$tag')" >&2
+if ! valid_tag "$tag"; then
+  echo "error: release tag must be valid vX.Y.Z[-prerelease][+build] semver (got '$tag')" >&2
   exit 1
 fi
 expected="${tag#v}"
