@@ -1,4 +1,4 @@
-use crate::models::{App, AppData, Settings, SourceType};
+use crate::models::{App, AppData, CheckAttempt, CheckAttemptState, Settings, SourceType};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
@@ -15,6 +15,20 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 pub struct Storage {
     file_path: PathBuf,
     data: Mutex<AppData>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingResultApplication {
+    Applied,
+    AppRemoved,
+    DependenciesChanged,
+}
+
+pub struct CheckOwnedUpdate {
+    pub current_version: Option<String>,
+    pub install_path: Option<String>,
+    pub latest_version: Option<String>,
+    pub attempt: CheckAttempt,
 }
 
 /// Obtainintosh tracks itself by default: put the app's own entry at the top of
@@ -229,6 +243,60 @@ impl Storage {
         *data = proposed;
         Ok(())
     }
+
+    pub fn apply_check_result(
+        &self,
+        snapshot: &App,
+        update: CheckOwnedUpdate,
+    ) -> Result<PendingResultApplication> {
+        let mut data = self.data.lock().unwrap();
+        let Some(index) = data.apps.iter().position(|app| app.id == snapshot.id) else {
+            return Ok(PendingResultApplication::AppRemoved);
+        };
+        let current = &data.apps[index];
+        if current.name != snapshot.name || !same_source_identity(current, snapshot) {
+            return Ok(PendingResultApplication::DependenciesChanged);
+        }
+
+        let mut proposed = data.clone();
+        let current = &mut proposed.apps[index];
+        current.current_version = update.current_version;
+        current.install_path = update.install_path;
+        if update.attempt.state == CheckAttemptState::Succeeded {
+            current.latest_version = update.latest_version;
+            current.last_checked = Some(update.attempt.attempted_at.clone());
+        }
+        current.last_check_attempt = Some(update.attempt);
+
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(PendingResultApplication::Applied)
+    }
+
+    pub fn apply_download_release(
+        &self,
+        snapshot: &App,
+        latest_version: String,
+        checked_at: String,
+    ) -> Result<PendingResultApplication> {
+        let mut data = self.data.lock().unwrap();
+        let Some(index) = data.apps.iter().position(|app| app.id == snapshot.id) else {
+            return Ok(PendingResultApplication::AppRemoved);
+        };
+        if !same_source_identity(&data.apps[index], snapshot) {
+            return Ok(PendingResultApplication::DependenciesChanged);
+        }
+
+        let mut proposed = data.clone();
+        let current = &mut proposed.apps[index];
+        current.latest_version = Some(latest_version);
+        current.last_checked = Some(checked_at.clone());
+        current.last_check_attempt = Some(CheckAttempt::succeeded(checked_at));
+
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(PendingResultApplication::Applied)
+    }
 }
 
 fn backup_corrupt_file(file_path: &Path) -> Result<PathBuf> {
@@ -262,6 +330,25 @@ fn has_duplicate_github_source(apps: &[App], identity: &str, excluding_id: Optio
             && crate::sources::normalize_repo_url(&app.source_url)
                 .is_ok_and(|existing| existing == identity)
     })
+}
+
+fn same_source_identity(left: &App, right: &App) -> bool {
+    if left.source_type != right.source_type {
+        return false;
+    }
+
+    match left.source_type {
+        SourceType::GitHub => {
+            match (
+                crate::sources::normalize_repo_url(&left.source_url),
+                crate::sources::normalize_repo_url(&right.source_url),
+            ) {
+                (Ok(left), Ok(right)) => left == right,
+                _ => left.source_url == right.source_url,
+            }
+        }
+        SourceType::GitLab => left.source_url == right.source_url,
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +418,7 @@ mod tests {
             latest_version: None,
             install_path: None,
             last_checked: None,
+            last_check_attempt: None,
         }
     }
 
@@ -439,6 +527,7 @@ mod tests {
         assert_eq!(legacy.latest_version, None);
         assert_eq!(legacy.install_path, None);
         assert_eq!(legacy.last_checked, None);
+        assert_eq!(legacy.last_check_attempt, None);
         let settings = storage.get_settings().unwrap();
         assert_eq!(settings.github_token.as_deref(), Some("legacy-token"));
         assert_eq!(settings.gitlab_token, None);
@@ -548,6 +637,7 @@ mod tests {
                 latest_version: None,
                 install_path: None,
                 last_checked: None,
+                last_check_attempt: None,
             });
             assert!(seed_self_entry(&mut data)); // still marks the file as seeded
             assert_eq!(data.apps.len(), 1, "duplicated for {}", source_url);
@@ -635,6 +725,260 @@ mod tests {
         let preserved = storage.get_app("legacy").unwrap().unwrap();
         assert_eq!(preserved.source_type, SourceType::GitLab);
         assert_eq!(preserved.name, "Renamed legacy app");
+    }
+
+    #[test]
+    fn pending_check_result_is_discarded_after_name_or_source_edit() {
+        let (storage, _temp_dir) = test_storage();
+        storage
+            .add_app(app(
+                "pending",
+                SourceType::GitHub,
+                "https://github.com/owner/original",
+            ))
+            .unwrap();
+        let name_snapshot = storage.get_app("pending").unwrap().unwrap();
+
+        let mut renamed = name_snapshot.clone();
+        renamed.name = "Renamed".to_string();
+        renamed.current_version = Some("edited-current".to_string());
+        storage.update_app(renamed).unwrap();
+
+        let application = storage
+            .apply_check_result(
+                &name_snapshot,
+                CheckOwnedUpdate {
+                    current_version: Some("stale-current".to_string()),
+                    install_path: Some("/stale/path".to_string()),
+                    latest_version: Some("2.0.0".to_string()),
+                    attempt: CheckAttempt::succeeded("name-check".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(application, PendingResultApplication::DependenciesChanged);
+        let after_name_edit = storage.get_app("pending").unwrap().unwrap();
+        assert_eq!(after_name_edit.name, "Renamed");
+        assert_eq!(
+            after_name_edit.current_version.as_deref(),
+            Some("edited-current")
+        );
+        assert_eq!(after_name_edit.latest_version, None);
+
+        let source_snapshot = after_name_edit.clone();
+        let mut changed_source = after_name_edit;
+        changed_source.source_url = "https://github.com/owner/replacement".to_string();
+        storage.update_app(changed_source).unwrap();
+
+        let application = storage
+            .apply_check_result(
+                &source_snapshot,
+                CheckOwnedUpdate {
+                    current_version: None,
+                    install_path: None,
+                    latest_version: Some("3.0.0".to_string()),
+                    attempt: CheckAttempt::succeeded("source-check".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(application, PendingResultApplication::DependenciesChanged);
+        let current = storage.get_app("pending").unwrap().unwrap();
+        assert_eq!(current.source_url, "https://github.com/owner/replacement");
+        assert_eq!(current.latest_version, None);
+    }
+
+    #[test]
+    fn pending_check_result_is_ignored_after_removal() {
+        let (storage, _temp_dir) = test_storage();
+        storage
+            .add_app(app(
+                "pending",
+                SourceType::GitHub,
+                "https://github.com/owner/pending",
+            ))
+            .unwrap();
+        let snapshot = storage.get_app("pending").unwrap().unwrap();
+        storage.remove_app("pending").unwrap();
+
+        let application = storage
+            .apply_check_result(
+                &snapshot,
+                CheckOwnedUpdate {
+                    current_version: Some("1.0.0".to_string()),
+                    install_path: Some("/Applications/Pending.app".to_string()),
+                    latest_version: Some("2.0.0".to_string()),
+                    attempt: CheckAttempt::succeeded("completed".to_string()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(application, PendingResultApplication::AppRemoved);
+        assert!(storage.get_app("pending").unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_check_retains_successful_release_and_later_success_clears_failure() {
+        let (storage, _temp_dir) = test_storage();
+        storage
+            .add_app(app(
+                "attempts",
+                SourceType::GitHub,
+                "https://github.com/owner/attempts",
+            ))
+            .unwrap();
+        let snapshot = storage.get_app("attempts").unwrap().unwrap();
+
+        storage
+            .apply_check_result(
+                &snapshot,
+                CheckOwnedUpdate {
+                    current_version: Some("1.0.0".to_string()),
+                    install_path: Some("/Applications/Attempts.app".to_string()),
+                    latest_version: Some("2.0.0".to_string()),
+                    attempt: CheckAttempt::succeeded("first-success".to_string()),
+                },
+            )
+            .unwrap();
+        storage
+            .apply_check_result(
+                &snapshot,
+                CheckOwnedUpdate {
+                    current_version: Some("1.0.0".to_string()),
+                    install_path: Some("/Applications/Attempts.app".to_string()),
+                    latest_version: None,
+                    attempt: CheckAttempt::unsuccessful(
+                        "failed-attempt".to_string(),
+                        CheckAttemptState::Failed,
+                        "GitHub was unavailable",
+                    ),
+                },
+            )
+            .unwrap();
+
+        let failed = storage.get_app("attempts").unwrap().unwrap();
+        assert_eq!(failed.latest_version.as_deref(), Some("2.0.0"));
+        assert_eq!(failed.last_checked.as_deref(), Some("first-success"));
+        let failed_attempt = failed.last_check_attempt.unwrap();
+        assert_eq!(failed_attempt.state, CheckAttemptState::Failed);
+        assert_eq!(
+            failed_attempt.message.as_deref(),
+            Some("GitHub was unavailable")
+        );
+
+        storage
+            .apply_check_result(
+                &snapshot,
+                CheckOwnedUpdate {
+                    current_version: Some("1.0.0".to_string()),
+                    install_path: Some("/Applications/Attempts.app".to_string()),
+                    latest_version: Some("3.0.0".to_string()),
+                    attempt: CheckAttempt::succeeded("second-success".to_string()),
+                },
+            )
+            .unwrap();
+
+        let succeeded = storage.get_app("attempts").unwrap().unwrap();
+        assert_eq!(succeeded.latest_version.as_deref(), Some("3.0.0"));
+        assert_eq!(succeeded.last_checked.as_deref(), Some("second-success"));
+        let succeeded_attempt = succeeded.last_check_attempt.unwrap();
+        assert_eq!(succeeded_attempt.state, CheckAttemptState::Succeeded);
+        assert_eq!(succeeded_attempt.message, None);
+    }
+
+    #[test]
+    fn download_release_update_is_narrow_and_rejects_a_changed_source() {
+        let (storage, _temp_dir) = test_storage();
+        storage
+            .add_app(app(
+                "download",
+                SourceType::GitHub,
+                "https://github.com/Owner/Download",
+            ))
+            .unwrap();
+        let snapshot = storage.get_app("download").unwrap().unwrap();
+
+        let mut edited = snapshot.clone();
+        edited.name = "User Rename".to_string();
+        edited.current_version = Some("1.2.3".to_string());
+        edited.install_path = Some("/Applications/User Rename.app".to_string());
+        edited.source_url = "https://www.github.com/owner/download.git".to_string();
+        storage.update_app(edited).unwrap();
+
+        assert_eq!(
+            storage
+                .apply_download_release(
+                    &snapshot,
+                    "2.0.0".to_string(),
+                    "downloaded-at".to_string(),
+                )
+                .unwrap(),
+            PendingResultApplication::Applied
+        );
+        let current = storage.get_app("download").unwrap().unwrap();
+        assert_eq!(current.name, "User Rename");
+        assert_eq!(current.current_version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            current.install_path.as_deref(),
+            Some("/Applications/User Rename.app")
+        );
+        assert_eq!(current.latest_version.as_deref(), Some("2.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("downloaded-at"));
+
+        let second_snapshot = current;
+        let mut changed_source = second_snapshot.clone();
+        changed_source.source_url = "https://github.com/owner/other".to_string();
+        changed_source.latest_version = None;
+        changed_source.last_checked = None;
+        changed_source.last_check_attempt = None;
+        storage.update_app(changed_source).unwrap();
+        assert_eq!(
+            storage
+                .apply_download_release(
+                    &second_snapshot,
+                    "9.0.0".to_string(),
+                    "stale-download".to_string(),
+                )
+                .unwrap(),
+            PendingResultApplication::DependenciesChanged
+        );
+        let current = storage.get_app("download").unwrap().unwrap();
+        assert_eq!(current.source_url, "https://github.com/owner/other");
+        assert_eq!(current.latest_version, None);
+        assert_eq!(current.last_checked, None);
+        assert_eq!(current.last_check_attempt, None);
+    }
+
+    #[test]
+    fn failed_check_result_persistence_does_not_change_memory() {
+        let mut existing = app(
+            "pending",
+            SourceType::GitHub,
+            "https://github.com/owner/pending",
+        );
+        existing.latest_version = Some("1.0.0".to_string());
+        existing.last_checked = Some("old-success".to_string());
+        let snapshot = existing.clone();
+        let mut data = AppData::default();
+        data.apps.push(existing);
+        let (storage, _temp_dir) = failing_storage(data);
+
+        let error = storage
+            .apply_check_result(
+                &snapshot,
+                CheckOwnedUpdate {
+                    current_version: Some("1.0.0".to_string()),
+                    install_path: Some("/Applications/Pending.app".to_string()),
+                    latest_version: Some("2.0.0".to_string()),
+                    attempt: CheckAttempt::succeeded("new-success".to_string()),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "Failed to write temp file");
+        let current = storage.get_app("pending").unwrap().unwrap();
+        assert_eq!(current.current_version, None);
+        assert_eq!(current.latest_version.as_deref(), Some("1.0.0"));
+        assert_eq!(current.last_checked.as_deref(), Some("old-success"));
+        assert_eq!(current.last_check_attempt, None);
     }
 
     #[test]

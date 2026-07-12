@@ -89,16 +89,19 @@
     }
 
     function statusRank(app: App): number {
-        if (hasUpdate(app)) {
+        if (app.last_check_attempt?.state === 'failed' || app.last_check_attempt?.state === 'unsupported') {
             return 0;
         }
-        if (!app.latest_version) {
+        if (hasUpdate(app)) {
             return 1;
         }
-        if (app.current_version) {
+        if (!app.latest_version) {
             return 2;
         }
-        return 3;
+        if (app.current_version) {
+            return 3;
+        }
+        return 4;
     }
 
     function compareVersionStrings(leftRaw: string, rightRaw: string): number {

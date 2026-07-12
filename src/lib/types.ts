@@ -1,6 +1,14 @@
 // TypeScript types matching Rust models
 
 export type SourceType = 'github' | 'gitlab';
+export type CheckAttemptState = 'succeeded' | 'failed' | 'unsupported';
+export type CheckOutcomeState = CheckAttemptState | 'skipped';
+
+export interface CheckAttempt {
+  attempted_at: string;
+  state: CheckAttemptState;
+  message: string | null;
+}
 
 export interface App {
   id: string;
@@ -11,6 +19,14 @@ export interface App {
   latest_version: string | null;
   install_path: string | null;
   last_checked: string | null;
+  last_check_attempt: CheckAttempt | null;
+}
+
+export interface CheckOutcome {
+  app_id: string;
+  app_name: string;
+  state: CheckOutcomeState;
+  message: string | null;
 }
 
 export interface Settings {

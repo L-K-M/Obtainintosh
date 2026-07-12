@@ -1,6 +1,8 @@
-use crate::models::{App, Settings, SourceType, SystemColors};
+use crate::models::{
+    bounded_check_message, App, CheckAttempt, CheckAttemptState, Settings, SourceType, SystemColors,
+};
 use crate::sources::GitHubAdapter;
-use crate::storage::Storage;
+use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
 use crate::system_colors;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -58,6 +60,46 @@ struct DownloadProgress {
     done: bool,
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckOutcomeState {
+    Succeeded,
+    Failed,
+    Unsupported,
+    Skipped,
+}
+
+#[derive(serde::Serialize)]
+pub struct CheckOutcome {
+    app_id: String,
+    app_name: String,
+    state: CheckOutcomeState,
+    message: Option<String>,
+}
+
+fn check_outcome(app: &App, state: CheckOutcomeState, message: Option<String>) -> CheckOutcome {
+    CheckOutcome {
+        app_id: app.id.clone(),
+        app_name: app.name.clone(),
+        state,
+        message,
+    }
+}
+
+fn skipped_check_outcome(app: &App, application: PendingResultApplication) -> CheckOutcome {
+    let message = match application {
+        PendingResultApplication::AppRemoved => {
+            "The app was removed before its update check finished".to_string()
+        }
+        PendingResultApplication::DependenciesChanged => {
+            "The app changed before its update check finished; the old result was discarded"
+                .to_string()
+        }
+        PendingResultApplication::Applied => unreachable!("an applied result is not skipped"),
+    };
+    check_outcome(app, CheckOutcomeState::Skipped, Some(message))
+}
+
 #[tauri::command]
 pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String> {
     state.storage.get_all_apps().map_err(|e| e.to_string())
@@ -84,6 +126,7 @@ pub async fn add_app(url: String, name: String, state: State<'_, AppState>) -> R
         latest_version: None,
         install_path,
         last_checked: None,
+        last_check_attempt: None,
     };
 
     // Storage assigns the UUID, rejects duplicate source URLs, and returns
@@ -129,6 +172,7 @@ pub async fn update_app(
         // Version info from the old source is meaningless for the new one
         app.latest_version = None;
         app.last_checked = None;
+        app.last_check_attempt = None;
     }
     app.source_url = source_url;
 
@@ -158,7 +202,7 @@ pub async fn update_app(
 pub async fn check_for_updates(
     app_id: Option<String>,
     state: State<'_, AppState>,
-) -> Result<Vec<App>, String> {
+) -> Result<Vec<CheckOutcome>, String> {
     let apps = if let Some(id) = app_id {
         vec![state
             .storage
@@ -170,63 +214,109 @@ pub async fn check_for_updates(
     };
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    let mut updated_apps = Vec::new();
+    let mut outcomes = Vec::new();
 
-    for mut app in apps {
+    for app in apps {
         // Re-detect installed version; clear stale state if the app was uninstalled
-        match crate::installer::detect_installed_app(&app.name) {
-            Some((path, version)) => {
-                app.current_version = Some(version);
-                app.install_path = Some(path);
-            }
-            // Obtainintosh itself is running right now, so it always has a
-            // current version — even without an /Applications install. Prefer
-            // the bundle the process runs from (stays accurate if that bundle
-            // is replaced on disk by an update); the compiled-in version is
-            // the fallback for dev builds outside a bundle.
-            None if crate::updates::is_self_app(&app) => {
-                let (path, version) = match crate::installer::detect_running_bundle() {
-                    Some((path, version)) => (Some(path), version),
-                    None => (None, env!("CARGO_PKG_VERSION").to_string()),
-                };
-                app.current_version = Some(version);
-                app.install_path = path;
-            }
-            None => {
-                app.current_version = None;
-                app.install_path = None;
-            }
-        }
+        let (current_version, install_path) =
+            match crate::installer::detect_installed_app(&app.name) {
+                Some((path, version)) => (Some(version), Some(path)),
+                // Obtainintosh itself is running right now, so it always has a
+                // current version — even without an /Applications install. Prefer
+                // the bundle the process runs from (stays accurate if that bundle
+                // is replaced on disk by an update); the compiled-in version is
+                // the fallback for dev builds outside a bundle.
+                None if crate::updates::is_self_app(&app) => {
+                    let (path, version) = match crate::installer::detect_running_bundle() {
+                        Some((path, version)) => (Some(path), version),
+                        None => (None, env!("CARGO_PKG_VERSION").to_string()),
+                    };
+                    (Some(version), path)
+                }
+                None => (None, None),
+            };
 
-        let result = match app.source_type {
+        let (result, failure_state) = match app.source_type {
             SourceType::GitHub => {
                 let adapter = GitHubAdapter::new(settings.github_token.clone());
-                adapter.get_latest_release(&app.source_url).await
+                (
+                    adapter.get_latest_release(&app.source_url).await,
+                    CheckAttemptState::Failed,
+                )
             }
-            SourceType::GitLab => Err(anyhow::anyhow!(
-                "This existing GitLab source is unsupported; only GitHub repositories can be checked"
-            )),
+            SourceType::GitLab => (
+                Err(anyhow::anyhow!(
+                    "This existing GitLab source is unsupported; only GitHub repositories can be checked"
+                )),
+                CheckAttemptState::Unsupported,
+            ),
         };
+        let attempted_at = chrono::Utc::now().to_rfc3339();
 
         match result {
             Ok(release) => {
-                app.latest_version = Some(release.version);
-                app.last_checked = Some(chrono::Utc::now().to_rfc3339());
-                state
-                    .storage
-                    .update_app(app.clone())
-                    .map_err(|e| e.to_string())?;
-                updated_apps.push(app);
+                let update = CheckOwnedUpdate {
+                    current_version,
+                    install_path,
+                    latest_version: Some(release.version),
+                    attempt: CheckAttempt::succeeded(attempted_at),
+                };
+                match state.storage.apply_check_result(&app, update) {
+                    Ok(PendingResultApplication::Applied) => {
+                        outcomes.push(check_outcome(&app, CheckOutcomeState::Succeeded, None))
+                    }
+                    Ok(application) => outcomes.push(skipped_check_outcome(&app, application)),
+                    Err(error) => {
+                        log::error!("Failed to save update check for {}: {error:#}", app.name);
+                        outcomes.push(check_outcome(
+                            &app,
+                            CheckOutcomeState::Failed,
+                            Some(bounded_check_message(&format!(
+                                "Could not save the update check: {error}"
+                            ))),
+                        ));
+                    }
+                }
             }
 
-            Err(e) => {
-                log::error!("Failed to check updates for {}: {}", app.name, e);
-                updated_apps.push(app);
+            Err(error) => {
+                log::error!("Failed to check updates for {}: {error:#}", app.name);
+                let message = bounded_check_message(&error.to_string());
+                let update = CheckOwnedUpdate {
+                    current_version,
+                    install_path,
+                    latest_version: None,
+                    attempt: CheckAttempt::unsuccessful(attempted_at, failure_state, &message),
+                };
+                match state.storage.apply_check_result(&app, update) {
+                    Ok(PendingResultApplication::Applied) => {
+                        let state = if failure_state == CheckAttemptState::Unsupported {
+                            CheckOutcomeState::Unsupported
+                        } else {
+                            CheckOutcomeState::Failed
+                        };
+                        outcomes.push(check_outcome(&app, state, Some(message)));
+                    }
+                    Ok(application) => outcomes.push(skipped_check_outcome(&app, application)),
+                    Err(save_error) => {
+                        log::error!(
+                            "Failed to save unsuccessful update check for {}: {save_error:#}",
+                            app.name
+                        );
+                        outcomes.push(check_outcome(
+                            &app,
+                            CheckOutcomeState::Failed,
+                            Some(bounded_check_message(&format!(
+                                "{message}. The failure state could not be saved: {save_error}"
+                            ))),
+                        ));
+                    }
+                }
             }
         }
     }
 
-    Ok(updated_apps)
+    Ok(outcomes)
 }
 
 #[tauri::command]
@@ -330,15 +420,30 @@ pub async fn download_and_install(
 
     log::info!("Downloaded to {}", download_path.display());
 
-    // Downloading can happen before the first update check. Persist the release
-    // we just fetched so that successful downloads never produce "Not Found".
-    let mut updated_app = app;
-    updated_app.latest_version = Some(release.version.clone());
-    updated_app.last_checked = Some(chrono::Utc::now().to_rfc3339());
-    state
-        .storage
-        .update_app(updated_app)
-        .map_err(|e| e.to_string())?;
+    // Downloading can happen before the first update check. Persist only the
+    // release fields if this is still the same tracked source.
+    let metadata_guidance = match state.storage.apply_download_release(
+        &app,
+        release.version.clone(),
+        chrono::Utc::now().to_rfc3339(),
+    ) {
+        Ok(PendingResultApplication::Applied) => None,
+        Ok(PendingResultApplication::AppRemoved) => Some(
+            "The app was removed while downloading, so its tracked metadata was not updated. The verified file is still available."
+                .to_string(),
+        ),
+        Ok(PendingResultApplication::DependenciesChanged) => Some(
+            "The app's source changed while downloading, so the old source's release was not written to its current metadata. The verified file is still available."
+                .to_string(),
+        ),
+        Err(error) => {
+            log::error!("Failed to save downloaded release metadata: {error:#}");
+            Some(format!(
+                "The verified file is available, but Obtainintosh could not save its release metadata: {}",
+                bounded_check_message(&error.to_string())
+            ))
+        }
+    };
 
     // Instead of trying to install automatically (which requires special entitlements),
     // just reveal the file in Finder so the user can install it manually
@@ -357,8 +462,11 @@ pub async fn download_and_install(
     };
 
     // Return success message with instructions
+    let metadata_guidance = metadata_guidance
+        .map(|guidance| format!("\n\n{guidance}"))
+        .unwrap_or_default();
     Ok(format!(
-        "Download finished: {}\n\n{reveal_message}",
+        "Download finished: {}\n\n{reveal_message}{metadata_guidance}",
         download_path.display()
     ))
 }
