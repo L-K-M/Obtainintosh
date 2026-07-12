@@ -155,7 +155,7 @@
         emptyText="No apps tracked. Click 'Add Program...' to start."
         emptyColspan={5}
     >
-        {#each sortedApps as app}
+        {#each sortedApps as app (app.id)}
             <AppRow
                 {app}
                 hasUpdate={hasUpdate(app)}
