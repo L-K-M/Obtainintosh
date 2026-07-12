@@ -1,0 +1,28 @@
+[
+  {
+    "tag_name": "v3.0.0",
+    "body": "Unpublished draft",
+    "draft": true,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v3.0.0.dmg",
+        "size": 300
+      }
+    ]
+  },
+  {
+    "tag_name": "v2.9.0",
+    "body": "Published stable release",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v2.9.0.dmg",
+        "size": 290
+      }
+    ]
+  }
+]

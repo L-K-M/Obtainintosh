@@ -1,0 +1,41 @@
+[
+  {
+    "tag_name": "v2.0.0",
+    "body": "Current stable release",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "tool-linux-x86_64.tar.gz",
+        "browser_download_url": "https://example.invalid/tool-linux-x86_64.tar.gz",
+        "size": 200
+      }
+    ]
+  },
+  {
+    "tag_name": "v2.1.0-beta.1",
+    "body": "Newer prerelease",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v2.1.0-beta.1.dmg",
+        "size": 210
+      }
+    ]
+  },
+  {
+    "tag_name": "v1.9.0",
+    "body": "Older compatible stable release",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v1.9.0.dmg",
+        "size": 190
+      }
+    ]
+  }
+]

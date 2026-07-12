@@ -1,0 +1,13 @@
+{
+  "tag_name": "v2.0.0",
+  "body": "Current stable release",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "tool-linux-x86_64.tar.gz",
+      "browser_download_url": "https://example.invalid/tool-linux-x86_64.tar.gz",
+      "size": 200
+    }
+  ]
+}

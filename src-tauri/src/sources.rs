@@ -6,6 +6,7 @@ pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"))
 
 const GITHUB_URL_MESSAGE: &str =
     "Only GitHub repository URLs are supported (expected github.com/<owner>/<repo>)";
+const RECENT_RELEASE_LIMIT: usize = 10;
 
 /// Canonical GitHub identity shared by storage dedupe, adapter requests, and
 /// self-entry matching so accepted URLs and identity comparisons cannot drift.
@@ -101,6 +102,8 @@ struct GitHubRelease {
     assets: Vec<GitHubAsset>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    prerelease: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,22 +158,35 @@ impl GitHubAdapter {
             .await
             .context("Failed to fetch GitHub release")?;
 
-        let release: GitHubRelease = if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let latest: Option<GitHubRelease> = if response.status() == reqwest::StatusCode::NOT_FOUND {
             // `releases/latest` 404s when a repo only has pre-releases (common for
             // nightly/continuous builds), so fall back to the release list.
-            self.get_newest_prerelease(&owner, &repo).await?
+            None
         } else if !response.status().is_success() {
             anyhow::bail!("GitHub API error: {}", response.status());
         } else {
-            response
-                .json()
-                .await
-                .context("Failed to parse GitHub release")?
+            Some(
+                response
+                    .json()
+                    .await
+                    .context("Failed to parse GitHub release")?,
+            )
         };
 
-        // Find macOS-compatible asset
-        let asset =
-            Self::find_macos_asset(&release.assets).context("No macOS-compatible asset found")?;
+        if let Some(release) = latest.as_ref() {
+            if Self::find_macos_asset(&release.assets).is_some() {
+                return Self::build_release(release);
+            }
+        }
+
+        let releases = self.get_recent_releases(&owner, &repo).await?;
+        let release = Self::select_recent_release(&releases, latest.is_some())?;
+        Self::build_release(release)
+    }
+
+    fn build_release(release: &GitHubRelease) -> Result<Release> {
+        let asset = Self::find_macos_asset(&release.assets)
+            .context("Selected GitHub release has no macOS-compatible asset")?;
 
         Ok(Release {
             version: clean_version_tag(&release.tag_name),
@@ -178,14 +194,14 @@ impl GitHubAdapter {
             file_name: asset.name.clone(),
             file_size: Some(asset.size),
             checksum: None,
-            release_notes: release.body,
+            release_notes: release.body.clone(),
         })
     }
 
-    async fn get_newest_prerelease(&self, owner: &str, repo: &str) -> Result<GitHubRelease> {
+    async fn get_recent_releases(&self, owner: &str, repo: &str) -> Result<Vec<GitHubRelease>> {
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases?per_page=10",
-            owner, repo
+            "https://api.github.com/repos/{}/{}/releases?per_page={}",
+            owner, repo, RECENT_RELEASE_LIMIT
         );
 
         let response = self
@@ -198,15 +214,41 @@ impl GitHubAdapter {
             anyhow::bail!("GitHub API error: {}", response.status());
         }
 
-        let releases: Vec<GitHubRelease> = response
+        response
             .json()
             .await
-            .context("Failed to parse GitHub releases")?;
+            .context("Failed to parse GitHub releases")
+    }
 
-        releases
-            .into_iter()
-            .find(|r| !r.draft)
-            .context("No releases found for this repository")
+    fn select_recent_release(
+        releases: &[GitHubRelease],
+        stable_release_published: bool,
+    ) -> Result<&GitHubRelease> {
+        let stable = if stable_release_published {
+            Self::find_compatible_release(releases, false)
+        } else {
+            None
+        };
+
+        stable
+            .or_else(|| Self::find_compatible_release(releases, true))
+            .with_context(|| {
+                format!(
+                    "No macOS-compatible release found in the {} most recent GitHub releases",
+                    RECENT_RELEASE_LIMIT
+                )
+            })
+    }
+
+    fn find_compatible_release(
+        releases: &[GitHubRelease],
+        prerelease: bool,
+    ) -> Option<&GitHubRelease> {
+        releases.iter().find(|release| {
+            !release.draft
+                && release.prerelease == prerelease
+                && Self::find_macos_asset(&release.assets).is_some()
+        })
     }
 
     fn find_macos_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
@@ -330,6 +372,14 @@ pub fn validate_new_source(url: &str) -> Result<SourceType> {
 mod tests {
     use super::*;
 
+    fn parse_release(json: &str) -> GitHubRelease {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn parse_releases(json: &str) -> Vec<GitHubRelease> {
+        serde_json::from_str(json).unwrap()
+    }
+
     fn asset(name: &str) -> GitHubAsset {
         GitHubAsset {
             name: name.to_string(),
@@ -438,6 +488,52 @@ mod tests {
         assert_eq!(clean_version_tag("V2.0"), "2.0");
         assert_eq!(clean_version_tag("version-2"), "version-2");
         assert_eq!(clean_version_tag("vapor"), "vapor");
+    }
+
+    #[test]
+    fn latest_without_macos_asset_uses_older_stable_release() {
+        let latest = parse_release(include_str!(
+            "../test-data/github/latest-missing-mac-asset.json"
+        ));
+        let releases = parse_releases(include_str!("../test-data/github/older-stable-valid.json"));
+
+        assert!(GitHubAdapter::find_macos_asset(&latest.assets).is_none());
+        let selected = GitHubAdapter::select_recent_release(&releases, true).unwrap();
+        assert_eq!(selected.tag_name, "v1.9.0");
+
+        let selected = GitHubAdapter::select_recent_release(&releases[..2], true).unwrap();
+        assert_eq!(selected.tag_name, "v2.1.0-beta.1");
+    }
+
+    #[test]
+    fn recent_release_selection_excludes_drafts() {
+        let releases = parse_releases(include_str!("../test-data/github/draft-exclusion.json"));
+
+        let selected = GitHubAdapter::select_recent_release(&releases, true).unwrap();
+        assert_eq!(selected.tag_name, "v2.9.0");
+    }
+
+    #[test]
+    fn latest_404_falls_back_to_compatible_prerelease() {
+        let releases = parse_releases(include_str!("../test-data/github/prerelease-only.json"));
+
+        let selected = GitHubAdapter::select_recent_release(&releases, false).unwrap();
+        assert_eq!(selected.tag_name, "v4.0.0-beta.1");
+    }
+
+    #[test]
+    fn no_compatible_recent_release_has_clear_error() {
+        let releases = parse_releases(include_str!(
+            "../test-data/github/no-compatible-release.json"
+        ));
+
+        let error = GitHubAdapter::select_recent_release(&releases, true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "No macOS-compatible release found in the 10 most recent GitHub releases"
+        );
     }
 
     #[test]
