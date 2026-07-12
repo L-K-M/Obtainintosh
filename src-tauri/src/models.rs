@@ -60,5 +60,3 @@ impl Default for AppData {
         }
     }
 }
-
-

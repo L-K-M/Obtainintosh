@@ -4,12 +4,23 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Re-release an existing tag whose original run failed, without deleting and
+  # re-pushing the tag. Runs the workflow file from the default branch but
+  # builds the tagged commit.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, e.g. v1.0.0'
+        required: true
+        type: string
 
 permissions:
   contents: write # create the GitHub Release and upload assets
 
 env:
   CARGO_TERM_COLOR: always
+  # The tag being released: the pushed tag, or the workflow_dispatch input.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -19,26 +30,26 @@ jobs:
     name: Create draft release
     runs-on: ubuntu-22.04
     outputs:
-      release_id: ${{ steps.create.outputs.result }}
+      release_id: ${{ steps.create.outputs.release_id }}
     steps:
-      - uses: actions/checkout@v5
-
       - name: Create draft release
         id: create
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const tag = context.ref.replace('refs/tags/', '');
-            const { data } = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              name: `Obtainintosh ${tag}`,
-              draft: true,
-              prerelease: tag.includes('-'),
-              generate_release_notes: true,
-            });
-            return data.id;
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=false
+          case "$RELEASE_TAG" in
+            *-*) prerelease=true ;;
+          esac
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+            --method POST \
+            --raw-field tag_name="$RELEASE_TAG" \
+            --raw-field name="Obtainintosh ${RELEASE_TAG}" \
+            --field draft=true \
+            --field prerelease="$prerelease" \
+            --field generate_release_notes=true \
+            --jq '.id')"
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # Desktop bundles. Obtainintosh targets Mac OS X (.dmg-only bundle), so the
@@ -59,7 +70,11 @@ jobs:
             rust-targets: x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
+      # Explicit ref so workflow_dispatch re-releases build the tagged commit
+      # rather than the default branch. On tag pushes this matches github.ref.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Node
         uses: actions/setup-node@v5
@@ -127,12 +142,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Mark release as published
-        uses: actions/github-script@v8
-        with:
-          script: |
-            await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: ${{ needs.create-release.outputs.release_id }},
-              draft: false,
-            });
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            --method PATCH \
+            --field draft=false

@@ -25,10 +25,8 @@ impl Storage {
 
         // Load existing data or create new
         let data = if file_path.exists() {
-            let contents = fs::read_to_string(&file_path)
-                .context("Failed to read apps.json")?;
-            serde_json::from_str(&contents)
-                .context("Failed to parse apps.json")?
+            let contents = fs::read_to_string(&file_path).context("Failed to read apps.json")?;
+            serde_json::from_str(&contents).context("Failed to parse apps.json")?
         } else {
             AppData::default()
         };
@@ -41,16 +39,13 @@ impl Storage {
 
     fn save(&self) -> Result<()> {
         let data = self.data.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*data)
-            .context("Failed to serialize data")?;
-        
+        let json = serde_json::to_string_pretty(&*data).context("Failed to serialize data")?;
+
         // Atomic write: write to temp file then rename
         let temp_path = self.file_path.with_extension("json.tmp");
-        fs::write(&temp_path, json)
-            .context("Failed to write temp file")?;
-        fs::rename(&temp_path, &self.file_path)
-            .context("Failed to rename temp file")?;
-        
+        fs::write(&temp_path, json).context("Failed to write temp file")?;
+        fs::rename(&temp_path, &self.file_path).context("Failed to rename temp file")?;
+
         Ok(())
     }
 
@@ -72,7 +67,9 @@ impl Storage {
 
         let mut data = self.data.lock().unwrap();
         if data.apps.iter().any(|a| {
-            a.source_url.trim_end_matches('/').eq_ignore_ascii_case(app.source_url.trim_end_matches('/'))
+            a.source_url
+                .trim_end_matches('/')
+                .eq_ignore_ascii_case(app.source_url.trim_end_matches('/'))
         }) {
             anyhow::bail!("This repository is already being tracked");
         }
@@ -85,13 +82,13 @@ impl Storage {
 
     pub fn update_app(&self, updated_app: App) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        
+
         if let Some(app) = data.apps.iter_mut().find(|a| a.id == updated_app.id) {
             *app = updated_app;
         } else {
             anyhow::bail!("App not found: {}", updated_app.id);
         }
-        
+
         drop(data);
         self.save()
     }
@@ -100,7 +97,7 @@ impl Storage {
         let mut data = self.data.lock().unwrap();
         data.apps.retain(|app| app.id != id);
         drop(data);
-        
+
         self.save()
     }
 
@@ -113,7 +110,7 @@ impl Storage {
         let mut data = self.data.lock().unwrap();
         data.settings = settings;
         drop(data);
-        
+
         self.save()
     }
 }

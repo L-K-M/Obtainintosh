@@ -15,7 +15,7 @@ lints and tests it on a macOS runner to exercise the real target.
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
 | `.github/workflows/ci.yml` | PRs + pushes to `main` | Type-check and build the SvelteKit frontend, then run `cargo fmt`/`clippy`/`test`. |
-| `.github/workflows/release.yml` | Pushing a `v*.*.*` tag | Build the macOS Tauri `.dmg` bundles (Apple Silicon + Intel) and attach them to a GitHub Release. |
+| `.github/workflows/release.yml` | Pushing a `v*.*.*` tag, or manual dispatch with a `tag` input | Build the macOS Tauri `.dmg` bundles (Apple Silicon + Intel) and attach them to a GitHub Release. |
 
 ## Continuous integration (`ci.yml`)
 
@@ -33,7 +33,9 @@ The CI workflow has two parallel jobs:
   macOS `.dmg` is built by the release workflow.
 
 Obtainintosh's `src-tauri` is a single crate (not a Cargo workspace), so the cargo
-commands run without `--workspace`.
+commands run without `--workspace`. There is no `Cargo.toml` at the repository
+root — all cargo commands run from `src-tauri/` (the CI steps set
+`working-directory: src-tauri`).
 
 Since the Rust job runs on macOS, no Tauri Linux system packages are needed in
 CI. If a Linux job is ever added, Tauri v2 needs the `libwebkit2gtk-4.1-dev`
@@ -47,7 +49,8 @@ npm ci
 npm run check
 npm run build
 
-# Rust (run from the repository root)
+# Rust (run from src-tauri/)
+cd src-tauri
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
@@ -71,6 +74,12 @@ Or use the helper, which bumps the version everywhere it's declared (`package.js
 ```
 scripts/release.sh 1.2.3 --push
 ```
+
+If a release run fails after the tag is already pushed, there is no need to
+delete and re-push the tag: run the **Release** workflow manually from the
+Actions tab (workflow_dispatch) and pass the existing tag (e.g. `v1.2.3`) as
+the `tag` input. The workflow builds that tagged commit and attaches the
+bundles to a release for it.
 
 The workflow:
 

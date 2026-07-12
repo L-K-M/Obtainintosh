@@ -21,7 +21,10 @@ pub fn detect_installed_app(app_name: &str) -> Option<(String, String)> {
         }
 
         // Try case-insensitive search
-        log::debug!("Exact match failed, trying case-insensitive search in {}", dir);
+        log::debug!(
+            "Exact match failed, trying case-insensitive search in {}",
+            dir
+        );
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
@@ -48,36 +51,36 @@ pub fn detect_installed_app(app_name: &str) -> Option<(String, String)> {
 /// Get version from an installed .app bundle
 fn get_app_version(app_path: &str) -> Option<String> {
     let plist_path = format!("{}/Contents/Info.plist", app_path);
-    
+
     if !Path::new(&plist_path).exists() {
         return None;
     }
-    
+
     // Use PlistBuddy to read version
     let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(&["-c", "Print :CFBundleShortVersionString", &plist_path])
+        .args(["-c", "Print :CFBundleShortVersionString", &plist_path])
         .output()
         .ok()?;
-    
+
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !version.is_empty() {
             return Some(version);
         }
     }
-    
+
     // Fallback to CFBundleVersion
     let output = Command::new("/usr/libexec/PlistBuddy")
-        .args(&["-c", "Print :CFBundleVersion", &plist_path])
+        .args(["-c", "Print :CFBundleVersion", &plist_path])
         .output()
         .ok()?;
-    
+
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !version.is_empty() {
             return Some(version);
         }
     }
-    
+
     None
 }

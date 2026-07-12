@@ -1,7 +1,7 @@
 use crate::models::{App, Settings, SourceType, SystemColors};
-use crate::system_colors;
 use crate::sources::GitHubAdapter;
 use crate::storage::Storage;
+use crate::system_colors;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tauri::{Emitter, State};
@@ -26,21 +26,18 @@ pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String
 }
 
 #[tauri::command]
-pub async fn add_app(
-    url: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<App, String> {
+pub async fn add_app(url: String, name: String, state: State<'_, AppState>) -> Result<App, String> {
     // Detect source type
     let source_type = crate::sources::detect_source_type(&url)
         .ok_or_else(|| "Unsupported source URL".to_string())?;
 
     // Check if app is already installed
-    let (current_version, install_path) = if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
-        (Some(version), Some(path))
-    } else {
-        (None, None)
-    };
+    let (current_version, install_path) =
+        if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
+            (Some(version), Some(path))
+        } else {
+            (None, None)
+        };
 
     let app = App {
         id: String::new(),
@@ -71,7 +68,9 @@ pub async fn update_app(
     state: State<'_, AppState>,
 ) -> Result<App, String> {
     // Get existing app
-    let mut app = state.storage.get_app(&id)
+    let mut app = state
+        .storage
+        .get_app(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "App not found".to_string())?;
 
@@ -88,8 +87,11 @@ pub async fn update_app(
     app.source_type = crate::sources::detect_source_type(&app.source_url)
         .ok_or_else(|| "Unsupported source URL".to_string())?;
 
-    state.storage.update_app(app.clone()).map_err(|e| e.to_string())?;
-    
+    state
+        .storage
+        .update_app(app.clone())
+        .map_err(|e| e.to_string())?;
+
     Ok(app)
 }
 
@@ -107,10 +109,10 @@ pub async fn check_for_updates(
     } else {
         state.storage.get_all_apps().map_err(|e| e.to_string())?
     };
-    
+
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
     let mut updated_apps = Vec::new();
-    
+
     for mut app in apps {
         // Re-detect installed version; clear stale state if the app was uninstalled
         match crate::installer::detect_installed_app(&app.name) {
@@ -129,16 +131,17 @@ pub async fn check_for_updates(
                 let adapter = GitHubAdapter::new(settings.github_token.clone());
                 adapter.get_latest_release(&app.source_url).await
             }
-            SourceType::GitLab => {
-                Err(anyhow::anyhow!("GitLab support not yet implemented"))
-            }
+            SourceType::GitLab => Err(anyhow::anyhow!("GitLab support not yet implemented")),
         };
-        
+
         match result {
             Ok(release) => {
                 app.latest_version = Some(release.version);
                 app.last_checked = Some(chrono::Utc::now().to_rfc3339());
-                state.storage.update_app(app.clone()).map_err(|e| e.to_string())?;
+                state
+                    .storage
+                    .update_app(app.clone())
+                    .map_err(|e| e.to_string())?;
                 updated_apps.push(app);
             }
 
@@ -148,7 +151,7 @@ pub async fn check_for_updates(
             }
         }
     }
-    
+
     Ok(updated_apps)
 }
 
@@ -158,11 +161,11 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
 }
 
 #[tauri::command]
-pub async fn update_settings(
-    settings: Settings,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    state.storage.update_settings(settings).map_err(|e| e.to_string())
+pub async fn update_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .storage
+        .update_settings(settings)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -181,9 +184,9 @@ pub async fn download_and_install(
         .get_app(&app_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "App not found".to_string())?;
-    
+
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    
+
     // Get download URL
     log::info!("Fetching release info for {}", app.name);
     let release = match app.source_type {
@@ -198,25 +201,33 @@ pub async fn download_and_install(
             return Err("GitLab support not yet implemented".to_string());
         }
     };
-    
-    log::info!("Downloading {} from {}", release.file_name, release.download_url);
+
+    log::info!(
+        "Downloading {} from {}",
+        release.file_name,
+        release.download_url
+    );
 
     // Download file, emitting progress events for the frontend
     let progress_handle = app_handle.clone();
     let progress_app_id = app_id.clone();
     let progress_file_name = release.file_name.clone();
-    let download_result = download_file(&release.download_url, &release.file_name, move |downloaded, total| {
-        let _ = progress_handle.emit(
-            "download-progress",
-            DownloadProgress {
-                app_id: progress_app_id.clone(),
-                file_name: progress_file_name.clone(),
-                downloaded,
-                total,
-                done: false,
-            },
-        );
-    })
+    let download_result = download_file(
+        &release.download_url,
+        &release.file_name,
+        move |downloaded, total| {
+            let _ = progress_handle.emit(
+                "download-progress",
+                DownloadProgress {
+                    app_id: progress_app_id.clone(),
+                    file_name: progress_file_name.clone(),
+                    downloaded,
+                    total,
+                    done: false,
+                },
+            );
+        },
+    )
     .await;
 
     // Always emit a final "done" event so the frontend can close its progress UI
@@ -234,33 +245,39 @@ pub async fn download_and_install(
     let download_path = download_result.map_err(|e| e.to_string())?;
 
     log::info!("Downloaded to {}", download_path);
-    
+
     // Instead of trying to install automatically (which requires special entitlements),
     // just reveal the file in Finder so the user can install it manually
     log::info!("Revealing file in Finder...");
-    
+
     // Use 'open -R' to reveal the file in Finder
     let reveal_output = std::process::Command::new("open")
-        .args(&["-R", &download_path])
+        .args(["-R", &download_path])
         .output();
-    
+
     match reveal_output {
         Ok(output) if output.status.success() => {
             log::info!("File revealed in Finder successfully");
         }
         Ok(output) => {
-            log::warn!("Failed to reveal in Finder: {}", String::from_utf8_lossy(&output.stderr));
+            log::warn!(
+                "Failed to reveal in Finder: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Err(e) => {
             log::error!("Error running 'open' command: {}", e);
         }
     }
-    
+
     // Update app to mark that we've downloaded the latest version
     let mut updated_app = app;
     updated_app.last_checked = Some(chrono::Utc::now().to_rfc3339());
-    state.storage.update_app(updated_app).map_err(|e| e.to_string())?;
-    
+    state
+        .storage
+        .update_app(updated_app)
+        .map_err(|e| e.to_string())?;
+
     // Return success message with instructions
     Ok(format!("Download finished: {}\n\nThe file has been revealed in Finder. Please double-click it to install.", download_path))
 }
@@ -270,7 +287,11 @@ async fn download_file(
     filename: &str,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<String> {
-    log::debug!("download_file called with url={}, filename={}", url, filename);
+    log::debug!(
+        "download_file called with url={}, filename={}",
+        url,
+        filename
+    );
 
     // Asset names come from the GitHub API; keep only the final path component
     // so a malicious name can't escape the cache directory
@@ -332,5 +353,3 @@ async fn download_file(
 
     Ok(file_path.to_string_lossy().to_string())
 }
-
-

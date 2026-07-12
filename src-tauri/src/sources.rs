@@ -60,7 +60,10 @@ impl GitHubAdapter {
     pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
         let (owner, repo) = Self::parse_github_url(repo_url)?;
 
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            owner, repo
+        );
 
         let response = self
             .get(&api_url)
@@ -82,8 +85,8 @@ impl GitHubAdapter {
         };
 
         // Find macOS-compatible asset
-        let asset = Self::find_macos_asset(&release.assets)
-            .context("No macOS-compatible asset found")?;
+        let asset =
+            Self::find_macos_asset(&release.assets).context("No macOS-compatible asset found")?;
 
         Ok(Release {
             version: clean_version_tag(&release.tag_name),
@@ -96,7 +99,10 @@ impl GitHubAdapter {
     }
 
     async fn get_newest_prerelease(&self, owner: &str, repo: &str) -> Result<GitHubRelease> {
-        let api_url = format!("https://api.github.com/repos/{}/{}/releases?per_page=10", owner, repo);
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=10",
+            owner, repo
+        );
 
         let response = self
             .get(&api_url)
@@ -125,15 +131,24 @@ impl GitHubAdapter {
         let mut parts = without_scheme.split('/').filter(|s| !s.is_empty());
 
         let host = parts.next().unwrap_or_default();
-        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com")
+        {
             anyhow::bail!("Invalid GitHub URL: expected github.com/<owner>/<repo>");
         }
 
         // Ignore anything past owner/repo (e.g. /releases, /tree/main) as well as
         // query strings, fragments, and a trailing .git.
         let strip = |s: &str| s.split(['?', '#']).next().unwrap_or("").to_string();
-        let owner = strip(parts.next().context("GitHub URL is missing the repository owner")?);
-        let repo = strip(parts.next().context("GitHub URL is missing the repository name")?);
+        let owner = strip(
+            parts
+                .next()
+                .context("GitHub URL is missing the repository owner")?,
+        );
+        let repo = strip(
+            parts
+                .next()
+                .context("GitHub URL is missing the repository name")?,
+        );
         let repo = repo.trim_end_matches(".git").to_string();
 
         if owner.is_empty() || repo.is_empty() {
@@ -148,7 +163,16 @@ impl GitHubAdapter {
         // Priority order: dmg, pkg, app.tar.gz, tar.gz, zip
         // Note: Generic extensions (zip, tar.gz) require a keyword match to avoid picking up Windows/Linux files
         let extensions = ["dmg", "pkg", "app.tar.gz", "tar.gz", "zip"];
-        let macos_keywords = ["mac", "macos", "darwin", "osx", "universal", "arm64", "aarch64", "x86_64"];
+        let macos_keywords = [
+            "mac",
+            "macos",
+            "darwin",
+            "osx",
+            "universal",
+            "arm64",
+            "aarch64",
+            "x86_64",
+        ];
 
         // Architecture preference: universal first, then the native architecture,
         // then anything else that still looks like a macOS build.
@@ -190,9 +214,10 @@ impl GitHubAdapter {
             // We don't want to accidentally pick up a windows zip just because it's the only zip
             let is_generic = ["zip", "tar.gz"].contains(ext);
             if !is_generic {
-                if let Some(asset) = assets.iter().find(|a| {
-                    a.name.to_lowercase().ends_with(&suffix)
-                }) {
+                if let Some(asset) = assets
+                    .iter()
+                    .find(|a| a.name.to_lowercase().ends_with(&suffix))
+                {
                     log::debug!("Selected asset (extension match): {}", asset.name);
                     return Some(asset);
                 }
@@ -258,7 +283,8 @@ mod tests {
     fn test_parse_github_url_extra_segments() {
         // URLs deeper than the repo root should still resolve to owner/repo
         assert_eq!(
-            GitHubAdapter::parse_github_url("https://github.com/owner/repo/releases/latest").unwrap(),
+            GitHubAdapter::parse_github_url("https://github.com/owner/repo/releases/latest")
+                .unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
         assert_eq!(
