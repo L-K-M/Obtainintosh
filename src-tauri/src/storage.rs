@@ -158,25 +158,34 @@ impl Storage {
 
     fn load_from_path(file_path: PathBuf) -> Result<Self> {
         // Load existing data or create new
-        let mut data = if file_path.exists() {
-            tighten_storage_file_permissions(&file_path)?;
-            let contents = fs::read(&file_path).context("Failed to read apps.json")?;
-            match serde_json::from_slice(&contents) {
-                Ok(data) => data,
-                Err(error) => {
-                    let backup_path = backup_corrupt_file(&file_path).with_context(|| {
-                        format!("Failed to preserve unreadable apps.json after: {error}")
-                    })?;
-                    eprintln!(
-                        "Obtainintosh could not load persisted JSON at {} ({error}). The original data was preserved at {}. Starting with defaults.",
-                        file_path.display(),
-                        backup_path.display()
-                    );
-                    AppData::default()
+        let mut data = match fs::symlink_metadata(&file_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    anyhow::bail!("Refusing to use apps.json because it is a symbolic link");
+                }
+                if !metadata.file_type().is_file() {
+                    anyhow::bail!("Refusing to use apps.json because it is not a regular file");
+                }
+
+                tighten_storage_file_permissions(&file_path)?;
+                let contents = fs::read(&file_path).context("Failed to read apps.json")?;
+                match serde_json::from_slice(&contents) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        let backup_path = backup_corrupt_file(&file_path).with_context(|| {
+                            format!("Failed to preserve unreadable apps.json after: {error}")
+                        })?;
+                        eprintln!(
+                            "Obtainintosh could not load persisted JSON at {} ({error}). The original data was preserved at {}. Starting with defaults.",
+                            file_path.display(),
+                            backup_path.display()
+                        );
+                        AppData::default()
+                    }
                 }
             }
-        } else {
-            AppData::default()
+            Err(error) if error.kind() == io::ErrorKind::NotFound => AppData::default(),
+            Err(error) => return Err(error).context("Failed to inspect apps.json"),
         };
 
         let seeded = seed_self_entry(&mut data);
@@ -536,6 +545,52 @@ mod tests {
 
         assert_eq!(fs::read(&file_path).unwrap(), original);
         assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_rejects_an_apps_symlink_without_touching_its_target() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let target_path = temp_dir.path().join("target.json");
+        let data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        let original = serde_json::to_vec(&data).unwrap();
+        fs::write(&target_path, &original).unwrap();
+        set_mode(&target_path, 0o640);
+        std::os::unix::fs::symlink(&target_path, &file_path).unwrap();
+
+        let error = Storage::load_from_path(file_path.clone())
+            .map(|_| ())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Refusing to use apps.json because it is a symbolic link"
+        );
+        assert_eq!(fs::read(&target_path).unwrap(), original);
+        assert_eq!(mode(&target_path), 0o640);
+        assert!(fs::symlink_metadata(&file_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!temp_dir.path().join("apps.json.corrupt-backup").exists());
+    }
+
+    #[test]
+    fn startup_rejects_a_non_regular_apps_path() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        fs::create_dir(&file_path).unwrap();
+
+        let error = Storage::load_from_path(file_path).map(|_| ()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Refusing to use apps.json because it is not a regular file"
+        );
     }
 
     #[cfg(unix)]
