@@ -8,10 +8,15 @@ function createAppStore() {
     const { subscribe, set, update } = writable<{
         apps: App[];
         loading: boolean;
+        // True while an update check runs; drives the modal check-progress
+        // dialog. Distinct from `loading`, which also covers add/remove/
+        // download operations that must not open that dialog.
+        checking: boolean;
         error: string | null;
     }>({
         apps: [],
         loading: false,
+        checking: false,
         error: null
     });
 
@@ -64,16 +69,16 @@ function createAppStore() {
         // `quiet` suppresses the success notification (used for the automatic
         // check on launch); errors are always surfaced.
         checkForUpdates: async (quiet = false) => {
-            update(s => ({ ...s, loading: true, error: null }));
+            update(s => ({ ...s, loading: true, checking: true, error: null }));
             try {
                 const apps = await TauriService.checkForUpdates();
-                update(s => ({ ...s, apps, loading: false }));
+                update(s => ({ ...s, apps, loading: false, checking: false }));
                 if (!quiet) {
                     notifications.add('Update check completed', 'success');
                 }
             } catch (e) {
                 const error = getErrorMessage(e, 'Failed to check updates');
-                update(s => ({ ...s, error, loading: false }));
+                update(s => ({ ...s, error, loading: false, checking: false }));
                 notifications.add(error, 'error');
             }
         },

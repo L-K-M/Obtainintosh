@@ -1,8 +1,10 @@
 <script lang="ts">
-    import { ProgressBar } from '@lkmc/system7-ui';
+    import { ModalDialog, ProgressBar } from '@lkmc/system7-ui';
 
     // A System 7 Finder-style file copy progress dialog.
     // Driven by 'download-progress' events emitted from the Rust backend.
+    // Deliberately not dismissable (no onclose): downloads are not
+    // cancellable yet, and the dialog closes on the final done event.
     export let fileName: string;
     export let downloaded: number;
     export let total: number | null = null;
@@ -14,7 +16,7 @@
     }
 </script>
 
-<div class="overlay">
+<ModalDialog width="420px">
     <div class="copy-dialog">
         <div class="copy-line">
             <span class="copy-label">Downloading:</span>
@@ -35,31 +37,11 @@
             {/if}
         </div>
     </div>
-</div>
+</ModalDialog>
 
 <style>
-    .overlay {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
-        padding: 90px 16px 16px;
-        box-sizing: border-box;
-        z-index: 1000;
-        pointer-events: none;
-    }
-
     .copy-dialog {
-        pointer-events: auto;
-        background: #fff;
-        border: 2px solid #000;
-        outline: 1px solid #fff;
-        box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.5);
-        padding: 14px 18px 12px;
-        box-sizing: border-box;
-        width: 100%;
-        max-width: 460px;
+        padding: 10px 8px 6px;
     }
 
     .copy-line {
