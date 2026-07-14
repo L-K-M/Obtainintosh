@@ -1,6 +1,6 @@
 [package]
 name = "obtainintosh"
-version = "1.2.0"
+version = "1.2.1"
 description = "A macOS app for tracking and downloading app updates from GitHub Releases."
 authors = ["Lukas Mathis"]
 license = "MIT"
