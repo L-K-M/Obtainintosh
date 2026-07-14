@@ -18,6 +18,7 @@
     import {getCurrentWindow} from '@tauri-apps/api/window';
     import {listen} from '@tauri-apps/api/event';
     import {openUrl} from '@tauri-apps/plugin-opener';
+    import CheckProgressDialog from '$lib/components/dialogs/CheckProgressDialog.svelte';
     import DownloadProgressDialog from '$lib/components/dialogs/DownloadProgressDialog.svelte';
     import {windowFocused} from '$lib/util/windowState';
     import AboutDialog from '$lib/components/dialogs/AboutDialog.svelte';
@@ -45,7 +46,21 @@
     }
     let downloadProgress: DownloadProgress | null = null;
 
-    $: ({ apps, loading, error } = $appStore);
+    interface CheckProgress {
+        position: number;
+        total: number;
+        appName: string;
+        done: boolean;
+    }
+    let checkProgress: CheckProgress | null = null;
+
+    $: ({ apps, loading, checking, error } = $appStore);
+
+    // The dialog's visibility follows the store's `checking` flag (which is
+    // always cleared, even on errors that skip the backend's done event);
+    // events only refine the numbers. Drop a finished run's payload so the
+    // next check starts on the barber pole instead of stale counts.
+    $: if (!checking && checkProgress) checkProgress = null;
 
     $: windowStyle = systemColors ? getSystem7WindowStyle(systemColors) : '';
 
@@ -63,6 +78,10 @@
 
         const unlistenProgress = listen<DownloadProgress>('download-progress', (event) => {
             downloadProgress = event.payload.done ? null : event.payload;
+        });
+
+        const unlistenCheckProgress = listen<CheckProgress>('check-progress', (event) => {
+            checkProgress = event.payload.done ? null : event.payload;
         });
 
         const unlistenAddApp = appWindow.listen('menu-add-app', () => {
@@ -89,6 +108,7 @@
             unlistenSettings.then(fn => fn());
             unlistenAbout.then(fn => fn());
             unlistenProgress.then(fn => fn());
+            unlistenCheckProgress.then(fn => fn());
         };
     });
 
@@ -269,6 +289,14 @@
     {:else if activeModal?.type === 'about'}
         {@const modal = activeModal}
         <AboutDialog onClose={() => closeModal(modal)} />
+    {/if}
+
+    {#if checking}
+        <CheckProgressDialog
+            position={checkProgress?.position ?? null}
+            total={checkProgress?.total ?? null}
+            appName={checkProgress?.appName ?? null}
+        />
     {/if}
 
     {#if downloadProgress}

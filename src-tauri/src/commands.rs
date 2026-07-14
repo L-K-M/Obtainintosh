@@ -20,6 +20,19 @@ struct DownloadProgress {
     done: bool,
 }
 
+/// Progress of a batch update check, for the frontend's modal progress
+/// dialog. Emitted before each app is checked, so `position - 1` apps are
+/// finished when the event arrives — a progress bar driven by that count
+/// never overstates completion.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckProgress {
+    position: usize,
+    total: usize,
+    app_name: String,
+    done: bool,
+}
+
 #[tauri::command]
 pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String> {
     state.storage.get_all_apps().map_err(|e| e.to_string())
@@ -98,6 +111,7 @@ pub async fn update_app(
 #[tauri::command]
 pub async fn check_for_updates(
     app_id: Option<String>,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<App>, String> {
     let apps = if let Some(id) = app_id {
@@ -111,9 +125,20 @@ pub async fn check_for_updates(
     };
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    let total = apps.len();
     let mut updated_apps = Vec::new();
 
-    for mut app in apps {
+    for (index, mut app) in apps.into_iter().enumerate() {
+        // Fire-and-forget: progress display must never fail a check.
+        let _ = app_handle.emit(
+            "check-progress",
+            CheckProgress {
+                position: index + 1,
+                total,
+                app_name: app.name.clone(),
+                done: false,
+            },
+        );
         // Re-detect installed version; clear stale state if the app was uninstalled
         match crate::installer::detect_installed_app(&app.name) {
             Some((path, version)) => {
@@ -167,6 +192,16 @@ pub async fn check_for_updates(
             .map_err(|e| e.to_string())?;
         updated_apps.push(app);
     }
+
+    let _ = app_handle.emit(
+        "check-progress",
+        CheckProgress {
+            position: total,
+            total,
+            app_name: String::new(),
+            done: true,
+        },
+    );
 
     Ok(updated_apps)
 }
