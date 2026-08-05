@@ -51,6 +51,23 @@ fn resolve_source_type(source_type: Option<SourceType>, url: &str) -> Result<Sou
         })
 }
 
+/// Credentials the dialog sent, kept only for a forge that authenticates with
+/// them. The dialog already blanks the fields for the other source types, but
+/// enforcing it here too means a bug or a hand-made IPC call can't park an
+/// application key in the plaintext data file against a source that would
+/// never send it. Matched exhaustively on purpose: a new forge has to make
+/// this decision rather than inherit one.
+fn credentials_for(
+    source_type: SourceType,
+    username: Option<String>,
+    access_token: Option<String>,
+) -> ForgeCredentials {
+    match source_type {
+        SourceType::Forgejo => ForgeCredentials::new(username, access_token),
+        SourceType::GitHub | SourceType::GitLab => ForgeCredentials::default(),
+    }
+}
+
 #[tauri::command]
 pub async fn add_app(
     url: String,
@@ -61,7 +78,7 @@ pub async fn add_app(
     state: State<'_, AppState>,
 ) -> Result<App, String> {
     let source_type = resolve_source_type(source_type, &url)?;
-    let credentials = ForgeCredentials::new(username, access_token);
+    let credentials = credentials_for(source_type, username, access_token);
 
     // Check if app is already installed
     let (current_version, install_path) =
@@ -125,8 +142,9 @@ pub async fn update_app(
     app.source_type = resolve_source_type(source_type, &app.source_url)?;
 
     // Credentials come from the dialog every time, so clearing a field there
-    // clears the stored one too.
-    let credentials = ForgeCredentials::new(username, access_token);
+    // clears the stored one too — as does retyping the app to a forge that
+    // does not use them, which drops any key left over from the old type.
+    let credentials = credentials_for(app.source_type, username, access_token);
     app.username = credentials.username().map(str::to_string);
     app.access_token = credentials.token().map(str::to_string);
 
@@ -464,4 +482,45 @@ async fn download_file(
     log::debug!("Downloaded {} bytes to {:?}", downloaded, file_path);
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_are_kept_only_for_the_forge_that_uses_them() {
+        let entered = || (Some("alice".to_string()), Some("key123".to_string()));
+
+        let (username, access_token) = entered();
+        let forgejo = credentials_for(SourceType::Forgejo, username, access_token);
+        assert_eq!(forgejo.username(), Some("alice"));
+        assert_eq!(forgejo.token(), Some("key123"));
+
+        // Retyping an app to a forge that authenticates differently drops the
+        // key rather than leaving it in the plaintext data file.
+        for source_type in [SourceType::GitHub, SourceType::GitLab] {
+            let (username, access_token) = entered();
+            let dropped = credentials_for(source_type, username, access_token);
+            assert_eq!(dropped, ForgeCredentials::default(), "{source_type:?}");
+        }
+    }
+
+    #[test]
+    fn source_type_falls_back_to_detection_only_when_unset() {
+        // An explicit pick wins, so a private instance on an unremarkable host
+        // is reachable at all.
+        assert_eq!(
+            resolve_source_type(
+                Some(SourceType::Forgejo),
+                "https://git.example.internal/o/r"
+            ),
+            Ok(SourceType::Forgejo)
+        );
+        assert_eq!(
+            resolve_source_type(None, "https://github.com/owner/repo"),
+            Ok(SourceType::GitHub)
+        );
+        assert!(resolve_source_type(None, "https://git.example.internal/o/r").is_err());
+    }
 }

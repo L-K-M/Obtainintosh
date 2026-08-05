@@ -59,6 +59,9 @@ Credentials are stored per tracked program, because every self-hosted instance i
 
 A username and key are sent as HTTP Basic credentials, which Forgejo accepts both on its API and on the routes that serve release assets. If an instance rejects that pair, leave **Forgejo Username** blank and enter only the application key: Obtainintosh then authenticates with Forgejo's `Authorization: token` scheme instead.
 
+> [!WARNING]
+> An `http://` instance address is accepted, because a Forgejo box on a local network often has no certificate. Both authentication schemes carry the application key in a request header, so over plain HTTP anyone on the network path can read it. Obtainintosh logs a warning each time it sends credentials that way. Prefer `https://` for anything beyond a trusted local network.
+
 ## Supported release assets
 
 Repositories must publish a macOS asset on their releases. Obtainintosh looks for these formats in priority order:

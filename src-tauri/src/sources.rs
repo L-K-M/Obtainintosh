@@ -214,8 +214,10 @@ impl ForgejoAdapter {
     }
 
     fn get(&self, url: &str) -> reqwest::RequestBuilder {
-        self.credentials
-            .authorize(http_client().get(url).header("Accept", "application/json"))
+        self.credentials.authorize(
+            http_client().get(url).header("Accept", "application/json"),
+            url,
+        )
     }
 
     pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
@@ -338,21 +340,40 @@ impl ForgeCredentials {
     }
 
     /// Adds the `Authorization` header Forgejo expects, if there is anything to
-    /// send.
+    /// send. `url` is the request's own URL, used only to warn about the
+    /// transport.
     ///
     /// With a username, HTTP Basic carrying the application key as the
     /// password: Forgejo reads an access token out of the Basic password, and
     /// Basic is accepted on the plain web routes that serve release assets —
     /// not just on `/api/v1` — which is what a private repository's download
     /// needs. Without one, the API's own `Authorization: token <key>` scheme.
-    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match (&self.username, &self.token) {
-            (Some(username), Some(token)) => request.basic_auth(username, Some(token)),
-            (None, Some(token)) => request.header("Authorization", format!("token {}", token)),
-            // A username on its own authenticates nothing; send it to nobody.
-            (_, None) => request,
+    fn authorize(&self, request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        // A username on its own authenticates nothing; send it to nobody.
+        let Some(token) = &self.token else {
+            return request;
+        };
+
+        // Both schemes carry the key in a header a passive observer can read.
+        // `http://` instances are supported on purpose — a Forgejo box on the
+        // LAN often has no certificate — so this warns rather than refuses.
+        if is_plaintext_http(url) {
+            log::warn!(
+                "Sending Forgejo credentials over plain HTTP to {}; anyone on the network \
+                 path can read the application key",
+                url
+            );
+        }
+
+        match &self.username {
+            Some(username) => request.basic_auth(username, Some(token)),
+            None => request.header("Authorization", format!("token {}", token)),
         }
     }
+}
+
+fn is_plaintext_http(url: &str) -> bool {
+    url.trim_start().len() >= 7 && url.trim_start()[..7].eq_ignore_ascii_case("http://")
 }
 
 /// Credentials plus the instance origin they belong to. Asset URLs come from
@@ -372,7 +393,7 @@ impl DownloadAuth {
         url: &str,
     ) -> reqwest::RequestBuilder {
         if same_origin(url, &self.origin) {
-            self.credentials.authorize(request)
+            self.credentials.authorize(request, url)
         } else {
             log::warn!("Not sending instance credentials to a different origin: {url}");
             request
@@ -847,6 +868,29 @@ mod tests {
     }
 
     #[test]
+    fn test_plaintext_http_is_recognised() {
+        // Drives the warning logged before an application key goes out over a
+        // connection anyone on the path can read.
+        for url in [
+            "http://192.168.1.10:3000/owner/repo",
+            "HTTP://git.example.internal/owner/repo",
+            "  http://git.example.internal/owner/repo",
+        ] {
+            assert!(is_plaintext_http(url), "expected plain HTTP: {url}");
+        }
+        for url in [
+            "https://git.example.internal/owner/repo",
+            "HTTPS://git.example.internal/owner/repo",
+            // Not a scheme — a host that merely starts with the same letters.
+            "https://http.example.internal/owner/repo",
+            "http",
+            "",
+        ] {
+            assert!(!is_plaintext_http(url), "expected not plain HTTP: {url}");
+        }
+    }
+
+    #[test]
     fn test_debug_output_redacts_the_application_key() {
         // A stray `{:?}` must never put the key in the log — including through
         // a type that merely holds the credentials.
@@ -869,7 +913,10 @@ mod tests {
     /// built request so the assertion covers what actually goes over the wire.
     fn authorization_header(credentials: &ForgeCredentials) -> Option<String> {
         let request = credentials
-            .authorize(http_client().get("https://git.example.internal/"))
+            .authorize(
+                http_client().get("https://git.example.internal/"),
+                "https://git.example.internal/",
+            )
             .build()
             .unwrap();
         request
