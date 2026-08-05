@@ -180,6 +180,18 @@ mod tests {
     }
 
     #[test]
+    fn app_debug_output_redacts_the_application_key() {
+        let mut app = crate::updates::self_app_entry();
+        app.username = Some("alice".to_string());
+        app.access_token = Some("key123".to_string());
+
+        let rendered = format!("{:?}", app);
+        assert!(!rendered.contains("key123"), "leaked the key: {rendered}");
+        assert!(rendered.contains(crate::models::REDACTED), "{rendered}");
+        assert!(rendered.contains("alice"), "{rendered}");
+    }
+
+    #[test]
     fn seeds_self_entry_into_fresh_data() {
         let mut data = AppData::default();
         assert!(seed_self_entry(&mut data));

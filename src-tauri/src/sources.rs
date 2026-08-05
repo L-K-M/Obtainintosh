@@ -291,10 +291,26 @@ impl ForgejoAdapter {
 
 /// Credentials for a self-hosted forge instance: the account name plus the
 /// application key generated under Settings → Applications.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Debug` is hand-written so the key is redacted — `DownloadAuth` and anything
+/// else holding these inherits that. It is kept rather than dropped because
+/// `assert_eq!` needs it.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ForgeCredentials {
     username: Option<String>,
     token: Option<String>,
+}
+
+impl std::fmt::Debug for ForgeCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgeCredentials")
+            .field("username", &self.username)
+            .field(
+                "token",
+                &self.token.as_ref().map(|_| crate::models::REDACTED),
+            )
+            .finish()
+    }
 }
 
 impl ForgeCredentials {
@@ -828,6 +844,25 @@ mod tests {
         let trimmed = ForgeCredentials::new(Some(" alice ".to_string()), Some(" key ".to_string()));
         assert_eq!(trimmed.username(), Some("alice"));
         assert_eq!(trimmed.token(), Some("key"));
+    }
+
+    #[test]
+    fn test_debug_output_redacts_the_application_key() {
+        // A stray `{:?}` must never put the key in the log — including through
+        // a type that merely holds the credentials.
+        let credentials =
+            ForgeCredentials::new(Some("alice".to_string()), Some("key123".to_string()));
+        let auth = DownloadAuth {
+            credentials: credentials.clone(),
+            origin: "https://git.example.internal".to_string(),
+        };
+
+        for rendered in [format!("{:?}", credentials), format!("{:?}", auth)] {
+            assert!(!rendered.contains("key123"), "leaked the key: {rendered}");
+            assert!(rendered.contains(crate::models::REDACTED), "{rendered}");
+            // The username is not a secret and stays readable.
+            assert!(rendered.contains("alice"), "{rendered}");
+        }
     }
 
     /// The `Authorization` header the credentials produce, read back off a

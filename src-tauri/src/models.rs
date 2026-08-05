@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Stand-in printed in place of a secret by the hand-written `Debug` impls
+/// below, so a stray `{:?}` can't put an application key in the log.
+pub(crate) const REDACTED: &str = "[redacted]";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceType {
@@ -8,7 +12,9 @@ pub enum SourceType {
     Forgejo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` is hand-written below rather than derived, so that the application
+/// key is redacted.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct App {
     pub id: String,
     pub name: String,
@@ -30,6 +36,26 @@ pub struct App {
     /// key" to match that wording.
     #[serde(default)]
     pub access_token: Option<String>,
+}
+
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("source_type", &self.source_type)
+            .field("source_url", &self.source_url)
+            .field("current_version", &self.current_version)
+            .field("latest_version", &self.latest_version)
+            .field("install_path", &self.install_path)
+            .field("last_checked", &self.last_checked)
+            .field("username", &self.username)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| REDACTED),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
