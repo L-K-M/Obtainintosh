@@ -372,8 +372,13 @@ impl ForgeCredentials {
     }
 }
 
+/// `str::get` rather than a `[..7]` slice: indexing panics when byte 7 lands
+/// inside a multi-byte character, and this reads URLs that came off the
+/// network. A short or non-ASCII-prefixed URL is simply not plain HTTP.
 fn is_plaintext_http(url: &str) -> bool {
-    url.trim_start().len() >= 7 && url.trim_start()[..7].eq_ignore_ascii_case("http://")
+    url.trim_start()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
 }
 
 /// Credentials plus the instance origin they belong to. Asset URLs come from
@@ -634,6 +639,10 @@ pub fn detect_source_type(url: &str) -> Option<SourceType> {
 }
 
 /// The lowercased host of a URL, with any userinfo prefix and port removed.
+/// A bracketed IPv6 literal comes back truncated, which does not matter here:
+/// the only caller matches host *names* against forge software, and an IP
+/// literal never carries one, so such a URL falls through to "not detected"
+/// and the user picks the source type by hand.
 fn url_host(url: &str) -> Option<String> {
     let url = url.trim();
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
@@ -885,6 +894,8 @@ mod tests {
             "https://http.example.internal/owner/repo",
             "http",
             "",
+            // Byte 7 falls inside the two-byte "é": slicing here would panic.
+            "http:/éxample.internal/owner/repo",
         ] {
             assert!(!is_plaintext_http(url), "expected not plain HTTP: {url}");
         }
