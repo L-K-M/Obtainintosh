@@ -1,17 +1,17 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { App, Settings, SystemColors } from './types';
+import type { App, Settings, SourceInput, SystemColors } from './types';
 
 export class TauriService {
     static async getAllApps(): Promise<App[]> {
         return await invoke('get_all_apps');
     }
 
-    static async addApp(url: string, name: string): Promise<App> {
-        return await invoke('add_app', { url, name });
+    static async addApp(input: SourceInput): Promise<App> {
+        return await invoke('add_app', { ...input });
     }
 
-    static async updateApp(id: string, url: string, name: string): Promise<App> {
-        return await invoke('update_app', { id, url, name });
+    static async updateApp(id: string, input: SourceInput): Promise<App> {
+        return await invoke('update_app', { id, ...input });
     }
 
     static async removeApp(id: string): Promise<void> {

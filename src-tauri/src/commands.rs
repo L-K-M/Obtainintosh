@@ -1,5 +1,5 @@
 use crate::models::{App, Settings, SourceType, SystemColors};
-use crate::sources::GitHubAdapter;
+use crate::sources::{DownloadAuth, ForgeCredentials, ForgejoAdapter, GitHubAdapter};
 use crate::storage::Storage;
 use crate::system_colors;
 use anyhow::{Context, Result};
@@ -38,11 +38,30 @@ pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String
     state.storage.get_all_apps().map_err(|e| e.to_string())
 }
 
+/// The forge a URL belongs to: the type the user picked in the dialog, or a
+/// guess from the URL when they left it on "Detect automatically". A private
+/// Forgejo instance can be at any host, so detection alone can't be relied on.
+fn resolve_source_type(source_type: Option<SourceType>, url: &str) -> Result<SourceType, String> {
+    source_type
+        .or_else(|| crate::sources::detect_source_type(url))
+        .ok_or_else(|| {
+            "Unsupported source URL. Pick the source type (for example Forgejo) if the \
+             URL is not a github.com repository."
+                .to_string()
+        })
+}
+
 #[tauri::command]
-pub async fn add_app(url: String, name: String, state: State<'_, AppState>) -> Result<App, String> {
-    // Detect source type
-    let source_type = crate::sources::detect_source_type(&url)
-        .ok_or_else(|| "Unsupported source URL".to_string())?;
+pub async fn add_app(
+    url: String,
+    name: String,
+    source_type: Option<SourceType>,
+    username: Option<String>,
+    access_token: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<App, String> {
+    let source_type = resolve_source_type(source_type, &url)?;
+    let credentials = ForgeCredentials::new(username, access_token);
 
     // Check if app is already installed
     let (current_version, install_path) =
@@ -61,6 +80,8 @@ pub async fn add_app(url: String, name: String, state: State<'_, AppState>) -> R
         latest_version: None,
         install_path,
         last_checked: None,
+        username: credentials.username().map(str::to_string),
+        access_token: credentials.token().map(str::to_string),
     };
 
     // Storage assigns the UUID, rejects duplicate source URLs, and returns
@@ -78,6 +99,9 @@ pub async fn update_app(
     id: String,
     url: String,
     name: String,
+    source_type: Option<SourceType>,
+    username: Option<String>,
+    access_token: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<App, String> {
     // Get existing app
@@ -96,9 +120,15 @@ pub async fn update_app(
         app.source_url = url;
     }
 
-    // Re-detect source type in case URL changed
-    app.source_type = crate::sources::detect_source_type(&app.source_url)
-        .ok_or_else(|| "Unsupported source URL".to_string())?;
+    // The dialog sends the source type it displayed; fall back to detection so
+    // an edit that only changed the URL still re-detects it.
+    app.source_type = resolve_source_type(source_type, &app.source_url)?;
+
+    // Credentials come from the dialog every time, so clearing a field there
+    // clears the stored one too.
+    let credentials = ForgeCredentials::new(username, access_token);
+    app.username = credentials.username().map(str::to_string);
+    app.access_token = credentials.token().map(str::to_string);
 
     state
         .storage
@@ -167,6 +197,10 @@ pub async fn check_for_updates(
         let result = match app.source_type {
             SourceType::GitHub => {
                 let adapter = GitHubAdapter::new(settings.github_token.clone());
+                adapter.get_latest_release(&app.source_url).await
+            }
+            SourceType::Forgejo => {
+                let adapter = ForgejoAdapter::new(forge_credentials(&app));
                 adapter.get_latest_release(&app.source_url).await
             }
             SourceType::GitLab => Err(anyhow::anyhow!("GitLab support not yet implemented")),
@@ -238,15 +272,29 @@ pub async fn download_and_install(
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
 
-    // Get download URL
+    // Get download URL, plus whatever the asset download itself needs to
+    // authenticate with (a private Forgejo repository serves its assets behind
+    // the same credentials the API call used).
     log::info!("Fetching release info for {}", app.name);
-    let release = match app.source_type {
+    let (release, download_auth) = match app.source_type {
         SourceType::GitHub => {
             let adapter = GitHubAdapter::new(settings.github_token);
-            adapter
+            let release = adapter
                 .get_latest_release(&app.source_url)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            (release, None)
+        }
+        SourceType::Forgejo => {
+            let adapter = ForgejoAdapter::new(forge_credentials(&app));
+            let release = adapter
+                .get_latest_release(&app.source_url)
+                .await
+                .map_err(|e| e.to_string())?;
+            let auth = adapter
+                .download_auth(&app.source_url)
+                .map_err(|e| e.to_string())?;
+            (release, Some(auth))
         }
         SourceType::GitLab => {
             return Err("GitLab support not yet implemented".to_string());
@@ -266,6 +314,7 @@ pub async fn download_and_install(
     let download_result = download_file(
         &release.download_url,
         &release.file_name,
+        download_auth.as_ref(),
         move |downloaded, total| {
             let _ = progress_handle.emit(
                 "download-progress",
@@ -333,9 +382,15 @@ pub async fn download_and_install(
     Ok(format!("Download finished: {}\n\nThe file has been revealed in Finder. Please double-click it to install.", download_path))
 }
 
+/// Credentials stored on a tracked app, for the forges that need them.
+fn forge_credentials(app: &App) -> ForgeCredentials {
+    ForgeCredentials::new(app.username.clone(), app.access_token.clone())
+}
+
 async fn download_file(
     url: &str,
     filename: &str,
+    auth: Option<&DownloadAuth>,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<String> {
     log::debug!(
@@ -366,11 +421,16 @@ async fn download_file(
         .user_agent(crate::sources::USER_AGENT)
         .build()
         .context("Failed to build HTTP client")?;
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to start download")?;
+
+    // Private-instance assets need the same credentials the release lookup
+    // used. `DownloadAuth` only attaches them to the instance's own origin;
+    // reqwest additionally drops the header if a redirect leaves that host.
+    let mut request = client.get(url);
+    if let Some(auth) = auth {
+        request = auth.authorize(request, url);
+    }
+
+    let mut response = request.send().await.context("Failed to start download")?;
 
     if !response.status().is_success() {
         anyhow::bail!("Download failed: server returned {}", response.status());

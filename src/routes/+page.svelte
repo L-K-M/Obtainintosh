@@ -1,7 +1,7 @@
 <script lang="ts">
     import {onMount, tick} from 'svelte';
 
-    import type {App, SystemColors} from '$lib/types';
+    import type {App, SourceInput, SystemColors} from '$lib/types';
     import AddAppDialog from '$lib/components/dialogs/AddAppDialog.svelte';
     import SettingsPanel from '$lib/components/dialogs/SettingsPanel.svelte';
     import {
@@ -124,8 +124,8 @@
         if (activeModal === modal) activeModal = null;
     }
 
-    async function handleAddApp(modal: AddModal, url: string, name: string) {
-        const success = await appStore.addApp(url, name);
+    async function handleAddApp(modal: AddModal, input: SourceInput) {
+        const success = await appStore.addApp(input);
         if (success) closeModal(modal);
     }
 
@@ -272,7 +272,7 @@
         <AddAppDialog
                 app={modal.app}
                 onclose={() => closeModal(modal)}
-                onadd={(e) => handleAddApp(modal, e.url, e.name)}
+                onadd={(input) => handleAddApp(modal, input)}
                 onupdate={() => handleUpdateApp(modal)}
         />
     {:else if activeModal?.type === 'settings'}

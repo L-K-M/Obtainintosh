@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceType {
     GitHub,
     GitLab,
+    Forgejo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +18,18 @@ pub struct App {
     pub latest_version: Option<String>,
     pub install_path: Option<String>,
     pub last_checked: Option<String>, // ISO 8601 timestamp
+    /// Credentials for a forge instance that needs them — currently only
+    /// Forgejo, where a private instance rejects anonymous API reads. Stored
+    /// per app rather than globally because every self-hosted instance issues
+    /// its own application key. `#[serde(default)]` keeps data files written
+    /// before these fields existed loadable.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Forgejo calls personal access tokens "applications" (Settings →
+    /// Applications → Generate New Token); the UI asks for an "application
+    /// key" to match that wording.
+    #[serde(default)]
+    pub access_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
