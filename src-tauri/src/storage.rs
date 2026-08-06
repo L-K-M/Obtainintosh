@@ -82,16 +82,19 @@ impl Storage {
             data: Mutex::new(data),
         };
         if seeded {
+            let data = storage.data.lock().unwrap();
             storage
-                .save()
+                .persist(&data)
                 .context("Failed to save the seeded self-entry")?;
         }
         Ok(storage)
     }
 
-    fn save(&self) -> Result<()> {
-        let data = self.data.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*data).context("Failed to serialize data")?;
+    /// Writes a snapshot to disk. Takes the data by reference rather than
+    /// reading `self.data`, so a caller can persist a *proposed* state before
+    /// deciding to adopt it — see the mutation methods below.
+    fn persist(&self, data: &AppData) -> Result<()> {
+        let json = serde_json::to_string_pretty(data).context("Failed to serialize data")?;
 
         // Atomic write: write to temp file then rename
         let temp_path = self.file_path.with_extension("json.tmp");
@@ -126,32 +129,41 @@ impl Storage {
         {
             anyhow::bail!("This repository is already being tracked");
         }
-        data.apps.push(app.clone());
-        drop(data);
+        // Build the state we want, write it, and only then adopt it. Mutating
+        // in place first would leave memory ahead of disk whenever the write
+        // fails — the app would show a program it did not persist, and the
+        // discrepancy would only surface on the next launch.
+        let mut proposed = data.clone();
+        proposed.apps.push(app.clone());
 
-        self.save()?;
+        self.persist(&proposed)?;
+        *data = proposed;
         Ok(app)
     }
 
     pub fn update_app(&self, updated_app: App) -> Result<()> {
         let mut data = self.data.lock().unwrap();
 
-        if let Some(app) = data.apps.iter_mut().find(|a| a.id == updated_app.id) {
-            *app = updated_app;
-        } else {
+        let Some(index) = data.apps.iter().position(|a| a.id == updated_app.id) else {
             anyhow::bail!("App not found: {}", updated_app.id);
-        }
+        };
 
-        drop(data);
-        self.save()
+        let mut proposed = data.clone();
+        proposed.apps[index] = updated_app;
+
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(())
     }
 
     pub fn remove_app(&self, id: &str) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        data.apps.retain(|app| app.id != id);
-        drop(data);
+        let mut proposed = data.clone();
+        proposed.apps.retain(|app| app.id != id);
 
-        self.save()
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(())
     }
 
     pub fn get_settings(&self) -> Result<Settings> {
@@ -161,10 +173,12 @@ impl Storage {
 
     pub fn update_settings(&self, settings: Settings) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        data.settings = settings;
-        drop(data);
+        let mut proposed = data.clone();
+        proposed.settings = settings;
 
-        self.save()
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(())
     }
 }
 
@@ -231,6 +245,95 @@ mod tests {
             // failing test would replace the real assertion message.
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A storage whose file lives under a directory that does not exist, so
+    /// every write fails. Lets the rollback tests drive the failure path
+    /// without depending on filesystem permissions.
+    fn failing_storage(data: AppData) -> (Storage, TestDir) {
+        let temp_dir = TestDir::new();
+        let storage = Storage {
+            file_path: temp_dir.path().join("missing").join("apps.json"),
+            data: Mutex::new(data),
+        };
+        (storage, temp_dir)
+    }
+
+    fn test_app(id: &str, source_url: &str) -> App {
+        App {
+            id: id.to_string(),
+            name: id.to_string(),
+            source_type: SourceType::GitHub,
+            source_url: source_url.to_string(),
+            current_version: None,
+            latest_version: None,
+            install_path: None,
+            last_checked: None,
+            username: None,
+            access_token: None,
+        }
+    }
+
+    #[test]
+    fn failed_add_does_not_change_memory() {
+        let (storage, _temp_dir) = failing_storage(AppData::default());
+
+        let error = storage
+            .add_app(test_app("new", "https://github.com/owner/new"))
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert!(storage.get_all_apps().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_update_does_not_change_memory() {
+        let mut data = AppData::default();
+        data.apps
+            .push(test_app("existing", "https://github.com/owner/existing"));
+        let (storage, _temp_dir) = failing_storage(data);
+        let mut updated = storage.get_app("existing").unwrap().unwrap();
+        updated.name = "Changed".to_string();
+
+        let error = storage.update_app(updated).unwrap_err().to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert_eq!(
+            storage.get_app("existing").unwrap().unwrap().name,
+            "existing"
+        );
+    }
+
+    #[test]
+    fn failed_remove_does_not_change_memory() {
+        let mut data = AppData::default();
+        data.apps
+            .push(test_app("existing", "https://github.com/owner/existing"));
+        let (storage, _temp_dir) = failing_storage(data);
+
+        let error = storage.remove_app("existing").unwrap_err().to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert!(storage.get_app("existing").unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_settings_update_does_not_change_memory() {
+        let mut data = AppData::default();
+        data.settings.github_token = Some("old-token".to_string());
+        let (storage, _temp_dir) = failing_storage(data);
+        let settings = Settings {
+            github_token: Some("new-token".to_string()),
+            gitlab_token: Some("new-gitlab-token".to_string()),
+        };
+
+        let error = storage.update_settings(settings).unwrap_err().to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        let settings = storage.get_settings().unwrap();
+        assert_eq!(settings.github_token.as_deref(), Some("old-token"));
+        assert_eq!(settings.gitlab_token, None);
     }
 
     #[test]
