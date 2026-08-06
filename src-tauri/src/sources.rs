@@ -51,7 +51,13 @@ struct ForgeRelease {
     assets: Vec<ReleaseAsset>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    prerelease: bool,
 }
+
+/// How far back to look when the newest release carries nothing this Mac can
+/// install. Matches the page size both forges are asked for.
+const RECENT_RELEASE_LIMIT: usize = 10;
 
 #[derive(Debug, Deserialize)]
 struct ReleaseAsset {
@@ -62,8 +68,9 @@ struct ReleaseAsset {
 
 impl ForgeRelease {
     /// Turns the forge's release into ours, picking the asset this Mac can use.
-    fn into_release(self) -> Result<Release> {
-        let asset = find_macos_asset(&self.assets).context("No macOS-compatible asset found")?;
+    fn build_release(&self) -> Result<Release> {
+        let asset = find_macos_asset(&self.assets)
+            .context("Selected release has no macOS-compatible asset")?;
 
         Ok(Release {
             version: clean_version_tag(&self.tag_name),
@@ -71,9 +78,63 @@ impl ForgeRelease {
             file_name: asset.name.clone(),
             file_size: Some(asset.size),
             checksum: None,
-            release_notes: self.body,
+            release_notes: self.body.clone(),
         })
     }
+
+    fn has_macos_asset(&self) -> bool {
+        find_macos_asset(&self.assets).is_some()
+    }
+}
+
+/// Picks a release this Mac can actually install out of the recent list.
+///
+/// Whether the forge had a nominal latest release at all decides how much
+/// freedom there is. Both forges' `releases/latest` returns the newest
+/// published, non-prerelease release, so when it answered, the repository does
+/// publish a stable channel and that is the channel the user is tracking.
+/// Quietly moving them onto a prerelease because the stable build happened to
+/// ship Linux-only assets would change what they are subscribed to without
+/// saying so, hence the restriction to stable there.
+///
+/// When it 404s there is no such expectation to protect, and the reason is not
+/// knowable from here — a repository that only ever publishes prereleases, one
+/// whose only stable releases are still drafts, or a forge that is simply
+/// inconsistent about the flag. So the search widens to the newest published
+/// release of any channel that carries an installable asset.
+fn select_recent_release(
+    releases: &[ForgeRelease],
+    stable_release_published: bool,
+) -> Result<&ForgeRelease> {
+    if stable_release_published {
+        return find_compatible_release(releases, Some(false)).with_context(|| {
+            format!(
+                "No macOS-compatible stable release found in the {} most recent releases",
+                RECENT_RELEASE_LIMIT
+            )
+        });
+    }
+
+    find_compatible_release(releases, None).with_context(|| {
+        format!(
+            "No macOS-compatible release found in the {} most recent releases",
+            RECENT_RELEASE_LIMIT
+        )
+    })
+}
+
+/// The newest published release carrying an asset this Mac can use, optionally
+/// restricted to one channel. Drafts are unpublished and never count. The list
+/// arrives newest-first from both forges, so the first match is the newest.
+fn find_compatible_release(
+    releases: &[ForgeRelease],
+    prerelease: Option<bool>,
+) -> Option<&ForgeRelease> {
+    releases.iter().find(|release| {
+        !release.draft
+            && prerelease.is_none_or(|wanted| release.prerelease == wanted)
+            && release.has_macos_asset()
+    })
 }
 
 pub struct GitHubAdapter {
@@ -123,26 +184,40 @@ impl GitHubAdapter {
             .await
             .context("Failed to fetch GitHub release")?;
 
-        let release: ForgeRelease = if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let latest: Option<ForgeRelease> = if response.status() == reqwest::StatusCode::NOT_FOUND {
             // `releases/latest` 404s when a repo only has pre-releases (common for
             // nightly/continuous builds), so fall back to the release list.
-            self.get_newest_prerelease(&owner, &repo).await?
+            None
         } else if !response.status().is_success() {
             anyhow::bail!("GitHub API error: {}", response.status());
         } else {
-            response
-                .json()
-                .await
-                .context("Failed to parse GitHub release")?
+            Some(
+                response
+                    .json()
+                    .await
+                    .context("Failed to parse GitHub release")?,
+            )
         };
 
-        release.into_release()
+        // The nominal latest release is only usable if it ships something this
+        // Mac can install. A project that publishes a source-only or
+        // Linux-only point release would otherwise make the app report no
+        // compatible asset at all, even with a perfectly good build one
+        // release back.
+        if let Some(release) = latest.as_ref() {
+            if release.has_macos_asset() {
+                return release.build_release();
+            }
+        }
+
+        let releases = self.get_recent_releases(&owner, &repo).await?;
+        select_recent_release(&releases, latest.is_some())?.build_release()
     }
 
-    async fn get_newest_prerelease(&self, owner: &str, repo: &str) -> Result<ForgeRelease> {
+    async fn get_recent_releases(&self, owner: &str, repo: &str) -> Result<Vec<ForgeRelease>> {
         let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases?per_page=10",
-            owner, repo
+            "https://api.github.com/repos/{}/{}/releases?per_page={}",
+            owner, repo, RECENT_RELEASE_LIMIT
         );
 
         let response = self
@@ -155,15 +230,10 @@ impl GitHubAdapter {
             anyhow::bail!("GitHub API error: {}", response.status());
         }
 
-        let releases: Vec<ForgeRelease> = response
+        response
             .json()
             .await
-            .context("Failed to parse GitHub releases")?;
-
-        releases
-            .into_iter()
-            .find(|r| !r.draft)
-            .context("No releases found for this repository")
+            .context("Failed to parse GitHub releases")
     }
 
     fn parse_github_url(url: &str) -> Result<(String, String)> {
@@ -230,28 +300,37 @@ impl ForgejoAdapter {
             .await
             .context("Failed to fetch Forgejo release")?;
 
-        let release: ForgeRelease = if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let latest: Option<ForgeRelease> = if response.status() == reqwest::StatusCode::NOT_FOUND {
             // Forgejo's `releases/latest` returns the newest non-draft,
             // non-prerelease release and 404s when there is none — the same
             // shape as GitHub, so fall back to the release list the same way.
             // A repository the credentials cannot see also 404s here, which
-            // `get_newest_prerelease` reports on.
-            self.get_newest_prerelease(&releases_url).await?
+            // `get_recent_releases` reports on.
+            None
         } else if !response.status().is_success() {
             anyhow::bail!("{}", forgejo_error(response.status()));
         } else {
-            response
-                .json()
-                .await
-                .context("Failed to parse Forgejo release")?
+            Some(
+                response
+                    .json()
+                    .await
+                    .context("Failed to parse Forgejo release")?,
+            )
         };
 
-        release.into_release()
+        if let Some(release) = latest.as_ref() {
+            if release.has_macos_asset() {
+                return release.build_release();
+            }
+        }
+
+        let releases = self.get_recent_releases(&releases_url).await?;
+        select_recent_release(&releases, latest.is_some())?.build_release()
     }
 
-    async fn get_newest_prerelease(&self, releases_url: &str) -> Result<ForgeRelease> {
+    async fn get_recent_releases(&self, releases_url: &str) -> Result<Vec<ForgeRelease>> {
         let response = self
-            .get(&format!("{}?limit=10", releases_url))
+            .get(&format!("{}?limit={}", releases_url, RECENT_RELEASE_LIMIT))
             .send()
             .await
             .context("Failed to fetch Forgejo releases")?;
@@ -267,15 +346,10 @@ impl ForgejoAdapter {
             anyhow::bail!("{}", forgejo_error(response.status()));
         }
 
-        let releases: Vec<ForgeRelease> = response
+        response
             .json()
             .await
-            .context("Failed to parse Forgejo releases")?;
-
-        releases
-            .into_iter()
-            .find(|r| !r.draft)
-            .context("No releases found for this repository")
+            .context("Failed to parse Forgejo releases")
     }
 
     /// The credentials to reuse for the asset download that follows a release
@@ -1091,7 +1165,7 @@ mod tests {
         }"#;
 
         let release: ForgeRelease = serde_json::from_str(payload).unwrap();
-        let release = release.into_release().unwrap();
+        let release = release.build_release().unwrap();
         assert_eq!(release.version, "2.1.0");
         assert_eq!(release.file_name, "App-macos-universal.dmg");
         assert_eq!(release.file_size, Some(4096));
@@ -1495,5 +1569,88 @@ mod tests {
             let assets = vec![asset(name)];
             assert!(find_macos_asset_for_arch(&assets, target_arch).is_none());
         }
+    }
+
+    fn parse_release(json: &str) -> ForgeRelease {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn parse_releases(json: &str) -> Vec<ForgeRelease> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn latest_without_macos_asset_falls_back_to_an_older_stable_release() {
+        let latest = parse_release(include_str!(
+            "../test-data/github/latest-missing-mac-asset.json"
+        ));
+        assert!(!latest.has_macos_asset(), "fixture should lack a Mac asset");
+
+        let releases = parse_releases(include_str!("../test-data/github/older-stable-valid.json"));
+        let selected = select_recent_release(&releases, true).unwrap();
+
+        // The newer prerelease is skipped: the repository publishes stable
+        // releases, so the user is tracking the stable channel.
+        assert_eq!(selected.tag_name, "v1.9.0");
+        assert_eq!(selected.build_release().unwrap().version, "1.9.0");
+    }
+
+    #[test]
+    fn a_repository_with_only_prereleases_selects_a_compatible_prerelease() {
+        let releases = parse_releases(include_str!("../test-data/github/prerelease-only.json"));
+
+        // stable_release_published = false: `releases/latest` 404d.
+        let selected = select_recent_release(&releases, false).unwrap();
+
+        assert_eq!(selected.tag_name, "v4.0.0-beta.1");
+    }
+
+    #[test]
+    fn drafts_are_never_selected() {
+        let releases = parse_releases(include_str!("../test-data/github/draft-exclusion.json"));
+
+        let selected = select_recent_release(&releases, true).unwrap();
+
+        assert_eq!(selected.tag_name, "v2.9.0", "a draft was selected");
+    }
+
+    #[test]
+    fn no_compatible_stable_release_does_not_silently_switch_channel() {
+        let releases = parse_releases(include_str!(
+            "../test-data/github/no-compatible-stable-release.json"
+        ));
+
+        // A compatible prerelease exists, but the repository publishes stable
+        // releases, so switching the user onto it would change the channel
+        // they track without saying so.
+        let error = select_recent_release(&releases, true)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains(
+                "No macOS-compatible stable release found in the 10 most recent releases"
+            ),
+            "{error}"
+        );
+        // The prerelease is there and installable — it is withheld on purpose,
+        // not missed.
+        assert!(find_compatible_release(&releases, Some(true)).is_some());
+    }
+
+    #[test]
+    fn without_a_stable_release_any_published_channel_is_acceptable() {
+        // `releases/latest` 404ing does not prove the repository is
+        // prerelease-only: its stable releases may all still be drafts, or the
+        // forge may be inconsistent about the flag. With no stable expectation
+        // to protect, the newest installable published release wins whatever
+        // its channel.
+        let releases = parse_releases(include_str!(
+            "../test-data/github/no-compatible-stable-release.json"
+        ));
+
+        let selected = select_recent_release(&releases, false).unwrap();
+
+        assert_eq!(selected.tag_name, "v5.1.0-beta.1");
     }
 }

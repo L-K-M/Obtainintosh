@@ -1,0 +1,41 @@
+[
+  {
+    "tag_name": "v5.0.0",
+    "body": "Stable Linux release",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "tool-linux-x86_64.tar.gz",
+        "browser_download_url": "https://example.invalid/tool-v5.0.0.tar.gz",
+        "size": 500
+      }
+    ]
+  },
+  {
+    "tag_name": "v5.1.0-beta.1",
+    "body": "Compatible Mac prerelease",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v5.1.0-beta.1.dmg",
+        "size": 510
+      }
+    ]
+  },
+  {
+    "tag_name": "v5.0.1",
+    "body": "Draft Mac release",
+    "draft": true,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v5.0.1.dmg",
+        "size": 501
+      }
+    ]
+  }
+]

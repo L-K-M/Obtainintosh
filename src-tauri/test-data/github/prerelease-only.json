@@ -1,0 +1,28 @@
+[
+  {
+    "tag_name": "v4.0.0-beta.2",
+    "body": "Latest prerelease without a Mac asset",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "tool-linux-x86_64.tar.gz",
+        "browser_download_url": "https://example.invalid/tool-v4.0.0-beta.2.tar.gz",
+        "size": 402
+      }
+    ]
+  },
+  {
+    "tag_name": "v4.0.0-beta.1",
+    "body": "Compatible prerelease",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "tool-macos-universal.dmg",
+        "browser_download_url": "https://example.invalid/tool-v4.0.0-beta.1.dmg",
+        "size": 401
+      }
+    ]
+  }
+]
