@@ -3,7 +3,6 @@ use crate::sources::{DownloadAuth, ForgeCredentials, ForgejoAdapter, GitHubAdapt
 use crate::storage::Storage;
 use crate::system_colors;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -11,7 +10,8 @@ use tauri::{Emitter, State};
 
 pub struct AppState {
     pub storage: Arc<Storage>,
-    pub in_flight_downloads: Arc<Mutex<HashSet<String>>>,
+    /// The one download allowed at a time, described for the error message.
+    pub active_download: Arc<Mutex<Option<String>>>,
 }
 
 /// How long a download may make no progress before it is abandoned. There is
@@ -20,44 +20,52 @@ pub struct AppState {
 /// would hang the download forever.
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Marks an app as downloading for as long as it is alive, so a second request
-/// for the same app is refused rather than racing the first. Released on drop,
-/// which covers the error and early-return paths too.
+/// Holds the single global download slot for as long as it is alive, so a
+/// second download — for any app — is refused rather than racing the first.
+/// Released on drop, which covers the error and early-return paths too.
+///
+/// The limit is global rather than per-app because the frontend has exactly one
+/// progress dialog, fed by a single `downloadProgress` value that each
+/// `download-progress` event overwrites. Two concurrent downloads would
+/// interleave in it, showing one app's byte count under the other's file name,
+/// and the first to finish would close the dialog for both.
 struct InFlightDownloadGuard {
-    app_id: String,
-    downloads: Arc<Mutex<HashSet<String>>>,
+    active_download: Arc<Mutex<Option<String>>>,
 }
 
 impl InFlightDownloadGuard {
-    fn acquire(app_id: &str, downloads: Arc<Mutex<HashSet<String>>>) -> Result<Self, String> {
-        let mut in_flight = lock_in_flight_downloads(&downloads);
-        if !in_flight.insert(app_id.to_string()) {
-            return Err("A download for this app is already in progress".to_string());
+    fn acquire(
+        operation: &str,
+        active_download: Arc<Mutex<Option<String>>>,
+    ) -> Result<Self, String> {
+        let mut active = lock_active_download(&active_download);
+        if let Some(active_operation) = active.as_deref() {
+            return Err(format!(
+                "A download for {active_operation} is already in progress; wait for it to finish before starting another"
+            ));
         }
-        drop(in_flight);
+        *active = Some(operation.to_string());
+        drop(active);
 
-        Ok(Self {
-            app_id: app_id.to_string(),
-            downloads,
-        })
+        Ok(Self { active_download })
     }
 }
 
 impl Drop for InFlightDownloadGuard {
     fn drop(&mut self) {
-        let mut downloads = lock_in_flight_downloads(&self.downloads);
-        downloads.remove(&self.app_id);
+        let mut active = lock_active_download(&self.active_download);
+        active.take();
     }
 }
 
-/// A panic while the set was held would otherwise poison it and refuse every
-/// later download. The tracked set is just in-flight ids, so recovering the
-/// last known state is safe.
-fn lock_in_flight_downloads(downloads: &Mutex<HashSet<String>>) -> MutexGuard<'_, HashSet<String>> {
-    downloads.lock().unwrap_or_else(|poisoned| {
-        log::warn!("In-flight download state was poisoned; recovering its last known state");
+/// A panic while the slot was held would otherwise poison it and refuse every
+/// later download. The tracked value is just a description of what is running,
+/// so recovering the last known state is safe.
+fn lock_active_download(active_download: &Mutex<Option<String>>) -> MutexGuard<'_, Option<String>> {
+    active_download.lock().unwrap_or_else(|poisoned| {
+        log::warn!("Active download state was poisoned; recovering its last known state");
         let guard = poisoned.into_inner();
-        downloads.clear_poison();
+        active_download.clear_poison();
         guard
     })
 }
@@ -334,17 +342,18 @@ pub async fn download_and_install(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // Held for the rest of the command: a second request for the same app is
-    // refused rather than racing this one, and the slot is freed on every exit
-    // path including the error returns below.
-    let _download_guard =
-        InFlightDownloadGuard::acquire(&app_id, Arc::clone(&state.in_flight_downloads))?;
-
     let app = state
         .storage
         .get_app(&app_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "App not found".to_string())?;
+
+    // Held for the rest of the command: any other download is refused rather
+    // than racing this one, and the slot is freed on every exit path including
+    // the error returns below. Named so the refusal can say what is running.
+    let download_operation = format!("{} ({})", app.name, app.id);
+    let _download_guard =
+        InFlightDownloadGuard::acquire(&download_operation, Arc::clone(&state.active_download))?;
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
 
@@ -836,14 +845,40 @@ mod tests {
     }
 
     #[test]
-    fn a_second_download_for_the_same_app_is_refused_until_the_first_finishes() {
-        let downloads = Arc::new(Mutex::new(HashSet::new()));
-        let first = InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).unwrap();
+    fn downloads_are_globally_serialized_and_the_slot_is_reusable() {
+        let active_download = Arc::new(Mutex::new(None));
+        let first = InFlightDownloadGuard::acquire("App One (app-1)", Arc::clone(&active_download))
+            .unwrap();
 
-        assert!(InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).is_err());
-        assert!(InFlightDownloadGuard::acquire("app-2", Arc::clone(&downloads)).is_ok());
+        // A different app is refused too, not just the same one: there is only
+        // one progress dialog to report into.
+        let error =
+            match InFlightDownloadGuard::acquire("App Two (app-2)", Arc::clone(&active_download)) {
+                Ok(_) => panic!("a cross-app download should be rejected"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            "A download for App One (app-1) is already in progress; wait for it to finish before starting another"
+        );
 
         drop(first);
-        assert!(InFlightDownloadGuard::acquire("app-1", Arc::clone(&downloads)).is_ok());
+        assert!(
+            InFlightDownloadGuard::acquire("App Two (app-2)", Arc::clone(&active_download)).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_poisoned_download_slot_still_admits_the_next_download() {
+        let active_download = Arc::new(Mutex::new(None));
+        let poisoned = Arc::clone(&active_download);
+        // Panic while the lock is held, poisoning it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison the slot");
+        }));
+        assert!(active_download.is_poisoned());
+
+        assert!(InFlightDownloadGuard::acquire("App One (app-1)", active_download).is_ok());
     }
 }
