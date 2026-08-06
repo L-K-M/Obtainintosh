@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { App, SourceInput } from '$lib/types';
+import type { App, CheckOutcome, SourceInput } from '$lib/types';
 import { TauriService } from '$lib/tauri';
 import { getErrorMessage } from '$lib/util/errors';
 import { notifications } from './notifications';
@@ -71,9 +71,18 @@ function createAppStore() {
         checkForUpdates: async (quiet = false) => {
             update(s => ({ ...s, loading: true, checking: true, error: null }));
             try {
-                const apps = await TauriService.checkForUpdates();
+                const outcomes = await TauriService.checkForUpdates();
+                // The check now reports per-app outcomes rather than the apps
+                // themselves, and it only writes the fields it owns, so the
+                // list is re-read rather than reconstructed here.
+                const apps = await TauriService.getAllApps();
                 update(s => ({ ...s, apps, loading: false, checking: false }));
-                if (!quiet) {
+                const incomplete = outcomes.filter(outcome => outcome.state !== 'succeeded');
+                if (incomplete.length > 0) {
+                    // Surfaced even when quiet: a check that silently did
+                    // nothing is exactly what this is meant to stop.
+                    notifications.add(checkFailureSummary(outcomes, incomplete), 'error');
+                } else if (!quiet) {
                     notifications.add('Update check completed', 'success');
                 }
             } catch (e) {
@@ -102,6 +111,21 @@ function createAppStore() {
             update(s => ({ ...s, error: null }));
         }
     };
+}
+
+/** One line summarising what a check run did not manage to do. */
+function checkFailureSummary(outcomes: CheckOutcome[], incomplete: CheckOutcome[]): string {
+    if (incomplete.length === 1) {
+        const outcome = incomplete[0];
+        const detail = outcome.message || 'The update check did not complete';
+        return `${outcome.appName}: ${detail}`;
+    }
+
+    if (incomplete.length === outcomes.length) {
+        return `Update checks failed or were skipped for all ${outcomes.length} apps`;
+    }
+
+    return `${incomplete.length} of ${outcomes.length} update checks failed or were skipped`;
 }
 
 export const appStore = createAppStore();

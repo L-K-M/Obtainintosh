@@ -1,6 +1,8 @@
-use crate::models::{App, Settings, SourceType, SystemColors};
+use crate::models::{
+    bounded_check_message, App, CheckAttempt, CheckAttemptState, Settings, SourceType, SystemColors,
+};
 use crate::sources::{DownloadAuth, ForgeCredentials, ForgejoAdapter, GitHubAdapter};
-use crate::storage::Storage;
+use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
 use crate::system_colors;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -101,6 +103,48 @@ struct CheckProgress {
     done: bool,
 }
 
+/// What the frontend is told about one app's check. `Skipped` covers a result
+/// that could not be applied because the app moved out from under it.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckOutcomeState {
+    Succeeded,
+    Failed,
+    Unsupported,
+    Skipped,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckOutcome {
+    app_id: String,
+    app_name: String,
+    state: CheckOutcomeState,
+    message: Option<String>,
+}
+
+fn check_outcome(app: &App, state: CheckOutcomeState, message: Option<String>) -> CheckOutcome {
+    CheckOutcome {
+        app_id: app.id.clone(),
+        app_name: app.name.clone(),
+        state,
+        message,
+    }
+}
+
+fn skipped_check_outcome(app: &App, application: PendingResultApplication) -> CheckOutcome {
+    let message = match application {
+        PendingResultApplication::AppRemoved => {
+            "The program was removed while its update check was running"
+        }
+        PendingResultApplication::DependenciesChanged => {
+            "The program changed while its update check was running, so the result was discarded"
+        }
+        PendingResultApplication::Applied => unreachable!("applied results are not skipped"),
+    };
+    check_outcome(app, CheckOutcomeState::Skipped, Some(message.to_string()))
+}
+
 #[tauri::command]
 pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String> {
     state.storage.get_all_apps().map_err(|e| e.to_string())
@@ -165,6 +209,7 @@ pub async fn add_app(
         latest_version: None,
         install_path,
         last_checked: None,
+        last_check_attempt: None,
         username: credentials.username().map(str::to_string),
         access_token: credentials.token().map(str::to_string),
     };
@@ -229,7 +274,7 @@ pub async fn check_for_updates(
     app_id: Option<String>,
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<Vec<App>, String> {
+) -> Result<Vec<CheckOutcome>, String> {
     // Only a batch check pays for indexing the application directories; a
     // single-app check would scan them just to answer one question.
     let is_batch = app_id.is_none();
@@ -252,6 +297,10 @@ pub async fn check_for_updates(
     // same directories N times.
     let detected = detect_apps_for_check(apps.clone(), is_batch).await?;
     let names: Arc<Vec<String>> = Arc::new(apps.iter().map(|app| app.name.clone()).collect());
+    // The records as they were before the check ran. apply_check_result
+    // compares against these, so a result cannot overwrite an edit the user
+    // made while the network work was in flight.
+    let snapshots = apps.clone();
     let pending: Vec<App> = apps
         .into_iter()
         .zip(detected)
@@ -326,37 +375,77 @@ pub async fn check_for_updates(
     )
     .await;
 
-    let mut updated_apps = Vec::with_capacity(total);
-    for (joined, original) in checked.into_iter().zip(pending) {
-        let (mut app, result) = match joined {
+    let mut outcomes = Vec::with_capacity(total);
+    for (joined, snapshot) in checked.into_iter().zip(snapshots) {
+        let (app, result) = match joined {
             Ok(checked) => checked,
             Err(error) => {
-                // The task died rather than returning an error. Keep the
-                // freshly detected state and carry on with the rest.
-                log::error!("Update check task failed for {}: {error}", original.name);
-                (original, Err(anyhow::anyhow!("Update check task failed")))
+                // The task died rather than returning an error. Record that
+                // against the app and carry on with the rest.
+                log::error!("Update check task failed for {}: {error}", snapshot.name);
+                (
+                    snapshot.clone(),
+                    Err(anyhow::anyhow!("Update check failed")),
+                )
             }
         };
 
-        match result {
-            Ok(release) => {
-                app.latest_version = Some(release.version);
-                app.last_checked = Some(chrono::Utc::now().to_rfc3339());
+        let failure_state = match app.source_type {
+            SourceType::GitLab => CheckAttemptState::Unsupported,
+            _ => CheckAttemptState::Failed,
+        };
+        let attempted_at = chrono::Utc::now().to_rfc3339();
+
+        // The installed-version re-detection is fresh either way, so it is
+        // persisted even when the release lookup failed. What a failure must
+        // not do is move latest_version or last_checked — that is what makes a
+        // stale figure distinguishable from a current one.
+        let (update, outcome) = match result {
+            Ok(release) => (
+                CheckOwnedUpdate {
+                    current_version: app.current_version.clone(),
+                    install_path: app.install_path.clone(),
+                    latest_version: Some(release.version),
+                    attempt: CheckAttempt::succeeded(attempted_at),
+                },
+                (CheckOutcomeState::Succeeded, None),
+            ),
+            Err(error) => {
+                log::error!("Failed to check updates for {}: {error:#}", app.name);
+                let message = bounded_check_message(&error.to_string());
+                let outcome_state = if failure_state == CheckAttemptState::Unsupported {
+                    CheckOutcomeState::Unsupported
+                } else {
+                    CheckOutcomeState::Failed
+                };
+                (
+                    CheckOwnedUpdate {
+                        current_version: app.current_version.clone(),
+                        install_path: app.install_path.clone(),
+                        latest_version: None,
+                        attempt: CheckAttempt::unsuccessful(attempted_at, failure_state, &message),
+                    },
+                    (outcome_state, Some(message)),
+                )
             }
-            Err(e) => {
-                log::error!("Failed to check updates for {}: {}", app.name, e);
+        };
+
+        match state.storage.apply_check_result(&snapshot, update) {
+            Ok(PendingResultApplication::Applied) => {
+                outcomes.push(check_outcome(&app, outcome.0, outcome.1))
+            }
+            Ok(application) => outcomes.push(skipped_check_outcome(&app, application)),
+            Err(error) => {
+                log::error!("Failed to save update check for {}: {error:#}", app.name);
+                outcomes.push(check_outcome(
+                    &app,
+                    CheckOutcomeState::Failed,
+                    Some(bounded_check_message(&format!(
+                        "Could not save the update check: {error}"
+                    ))),
+                ));
             }
         }
-
-        // Persist even when the release check failed: the installed-version
-        // re-detection above is fresh either way, and dropping it on a flaky
-        // network would leave the stored state stale until the next
-        // successful check. last_checked stays untouched on failure.
-        state
-            .storage
-            .update_app(app.clone())
-            .map_err(|e| e.to_string())?;
-        updated_apps.push(app);
     }
 
     let _ = app_handle.emit(
@@ -369,7 +458,7 @@ pub async fn check_for_updates(
         },
     );
 
-    Ok(updated_apps)
+    Ok(outcomes)
 }
 
 #[tauri::command]

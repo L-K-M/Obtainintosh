@@ -1,4 +1,4 @@
-use crate::models::{App, AppData, Settings};
+use crate::models::{App, AppData, CheckAttempt, CheckAttemptState, Settings};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{self, Write};
@@ -18,6 +18,28 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 pub struct Storage {
     file_path: PathBuf,
     data: Mutex<AppData>,
+}
+
+/// What happened when a check result was applied. A batch check runs against a
+/// snapshot taken before the network work started, so by the time a result
+/// lands the user may have removed or edited the app. Writing anyway would
+/// resurrect a deleted program or overwrite a fresh edit with stale data, so
+/// those cases are reported rather than applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingResultApplication {
+    Applied,
+    AppRemoved,
+    DependenciesChanged,
+}
+
+/// The fields a completed check owns. Deliberately narrow: a check has no
+/// business writing the name, source, or credentials, so it cannot clobber an
+/// edit the user made while it was running.
+pub struct CheckOwnedUpdate {
+    pub current_version: Option<String>,
+    pub install_path: Option<String>,
+    pub latest_version: Option<String>,
+    pub attempt: CheckAttempt,
 }
 
 /// Obtainintosh tracks itself by default: put the app's own entry at the top
@@ -309,6 +331,44 @@ impl Storage {
         Ok(data.settings.clone())
     }
 
+    /// Applies the outcome of a check that ran against `snapshot`, writing only
+    /// the fields a check owns and only if the record still matches what was
+    /// checked.
+    pub fn apply_check_result(
+        &self,
+        snapshot: &App,
+        update: CheckOwnedUpdate,
+    ) -> Result<PendingResultApplication> {
+        let mut data = self.data.lock().unwrap();
+        let Some(index) = data.apps.iter().position(|app| app.id == snapshot.id) else {
+            return Ok(PendingResultApplication::AppRemoved);
+        };
+        let current = &data.apps[index];
+        if current.name != snapshot.name
+            || !same_source_identity(current, snapshot)
+            || !same_check_metadata(current, snapshot)
+        {
+            return Ok(PendingResultApplication::DependenciesChanged);
+        }
+
+        let mut proposed = data.clone();
+        let current = &mut proposed.apps[index];
+        current.current_version = update.current_version;
+        current.install_path = update.install_path;
+        // A failed check must not touch latest_version or last_checked: the
+        // previously known version stays, flagged as stale by the attempt
+        // rather than silently replaced with nothing.
+        if update.attempt.state == CheckAttemptState::Succeeded {
+            current.latest_version = update.latest_version;
+            current.last_checked = Some(update.attempt.attempted_at.clone());
+        }
+        current.last_check_attempt = Some(update.attempt);
+
+        self.persist(&proposed)?;
+        *data = proposed;
+        Ok(PendingResultApplication::Applied)
+    }
+
     pub fn update_settings(&self, settings: Settings) -> Result<()> {
         let mut data = self.data.lock().unwrap();
         let mut proposed = data.clone();
@@ -318,6 +378,22 @@ impl Storage {
         *data = proposed;
         Ok(())
     }
+}
+
+/// Whether two records still point at the same repository, compared the way
+/// the dedupe in `add_app` does so the two cannot disagree.
+fn same_source_identity(left: &App, right: &App) -> bool {
+    left.source_type == right.source_type
+        && crate::sources::normalize_repo_url(&left.source_url)
+            == crate::sources::normalize_repo_url(&right.source_url)
+}
+
+/// Whether the check-owned fields are still as the snapshot left them. If they
+/// moved, another check already landed and this result is the older one.
+fn same_check_metadata(left: &App, right: &App) -> bool {
+    left.latest_version == right.latest_version
+        && left.last_checked == right.last_checked
+        && left.last_check_attempt == right.last_check_attempt
 }
 
 /// Moves an unparseable data file aside and returns where it went, so the
@@ -606,6 +682,7 @@ mod tests {
             latest_version: None,
             install_path: None,
             last_checked: None,
+            last_check_attempt: None,
             username: None,
             access_token: None,
         }
@@ -854,6 +931,7 @@ mod tests {
                 latest_version: None,
                 install_path: None,
                 last_checked: None,
+                last_check_attempt: None,
                 username: None,
                 access_token: None,
             });
@@ -862,5 +940,134 @@ mod tests {
             assert_eq!(data.apps[0].id, "existing");
             assert!(data.self_entry_seeded);
         }
+    }
+
+    fn succeeded_update(latest: &str) -> CheckOwnedUpdate {
+        CheckOwnedUpdate {
+            current_version: Some("1.0.0".to_string()),
+            install_path: Some("/Applications/Existing.app".to_string()),
+            latest_version: Some(latest.to_string()),
+            attempt: CheckAttempt::succeeded("2026-08-06T00:00:00Z".to_string()),
+        }
+    }
+
+    fn failed_update() -> CheckOwnedUpdate {
+        CheckOwnedUpdate {
+            current_version: Some("1.0.0".to_string()),
+            install_path: Some("/Applications/Existing.app".to_string()),
+            latest_version: None,
+            attempt: CheckAttempt::unsuccessful(
+                "2026-08-06T00:00:00Z".to_string(),
+                CheckAttemptState::Failed,
+                "the network went away",
+            ),
+        }
+    }
+
+    fn storage_with_one_app() -> (Storage, TestDir, App) {
+        let temp_dir = TestDir::new();
+        let app = test_app("existing", "https://github.com/owner/existing");
+        let mut data = AppData::default();
+        data.apps.push(app.clone());
+        let storage = Storage {
+            file_path: temp_dir.path().join("apps.json"),
+            data: Mutex::new(data),
+        };
+        (storage, temp_dir, app)
+    }
+
+    #[test]
+    fn a_successful_check_records_its_version_and_timestamp() {
+        let (storage, _temp, snapshot) = storage_with_one_app();
+
+        let applied = storage
+            .apply_check_result(&snapshot, succeeded_update("2.0.0"))
+            .unwrap();
+
+        assert_eq!(applied, PendingResultApplication::Applied);
+        let stored = storage.get_app("existing").unwrap().unwrap();
+        assert_eq!(stored.latest_version.as_deref(), Some("2.0.0"));
+        assert_eq!(stored.last_checked.as_deref(), Some("2026-08-06T00:00:00Z"));
+        assert_eq!(
+            stored.last_check_attempt.unwrap().state,
+            CheckAttemptState::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_failed_check_keeps_the_last_known_version_and_marks_it_stale() {
+        let (storage, _temp, snapshot) = storage_with_one_app();
+        storage
+            .apply_check_result(&snapshot, succeeded_update("2.0.0"))
+            .unwrap();
+        let snapshot = storage.get_app("existing").unwrap().unwrap();
+
+        storage
+            .apply_check_result(&snapshot, failed_update())
+            .unwrap();
+
+        let stored = storage.get_app("existing").unwrap().unwrap();
+        // The figure the user can still act on survives; only the attempt
+        // records that it is no longer fresh.
+        assert_eq!(stored.latest_version.as_deref(), Some("2.0.0"));
+        assert_eq!(stored.last_checked.as_deref(), Some("2026-08-06T00:00:00Z"));
+        let attempt = stored.last_check_attempt.unwrap();
+        assert_eq!(attempt.state, CheckAttemptState::Failed);
+        assert_eq!(attempt.message.as_deref(), Some("the network went away"));
+    }
+
+    #[test]
+    fn a_result_for_a_removed_app_is_not_written_back() {
+        let (storage, _temp, snapshot) = storage_with_one_app();
+        storage.remove_app("existing").unwrap();
+
+        let applied = storage
+            .apply_check_result(&snapshot, succeeded_update("2.0.0"))
+            .unwrap();
+
+        assert_eq!(applied, PendingResultApplication::AppRemoved);
+        assert!(storage.get_app("existing").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_result_does_not_overwrite_an_edit_made_while_it_ran() {
+        let (storage, _temp, snapshot) = storage_with_one_app();
+        let mut renamed = snapshot.clone();
+        renamed.name = "Renamed".to_string();
+        storage.update_app(renamed).unwrap();
+
+        let applied = storage
+            .apply_check_result(&snapshot, succeeded_update("2.0.0"))
+            .unwrap();
+
+        assert_eq!(applied, PendingResultApplication::DependenciesChanged);
+        let stored = storage.get_app("existing").unwrap().unwrap();
+        assert_eq!(stored.name, "Renamed");
+        assert_eq!(stored.latest_version, None);
+    }
+
+    #[test]
+    fn an_older_result_loses_to_one_that_already_landed() {
+        let (storage, _temp, snapshot) = storage_with_one_app();
+        storage
+            .apply_check_result(&snapshot, succeeded_update("3.0.0"))
+            .unwrap();
+
+        // The stale snapshot still has no latest_version, so its result is
+        // recognised as the older one and discarded.
+        let applied = storage
+            .apply_check_result(&snapshot, succeeded_update("2.0.0"))
+            .unwrap();
+
+        assert_eq!(applied, PendingResultApplication::DependenciesChanged);
+        assert_eq!(
+            storage
+                .get_app("existing")
+                .unwrap()
+                .unwrap()
+                .latest_version
+                .as_deref(),
+            Some("3.0.0")
+        );
     }
 }
