@@ -70,7 +70,7 @@
                             class:hidden={iconFailed}
                             on:error={() => iconFailed = true}
                         />
-                        <span class="app-icon fallback-icon" class:hidden={!iconFailed}>📄</span>
+                        <span class="app-icon" class:hidden={!iconFailed}>📄</span>
                     {:else}
                         <span class="app-icon">📄</span>
                     {/if}
@@ -221,13 +221,27 @@
         gap: 4px;
     }
 
+    /* Both icon variants occupy the same box, so the name starts at the same
+       x and the row is the same height whichever one a source renders. An
+       emoji left to size itself is wider and taller than the 18px image, which
+       is what pushed Forgejo rows out of line with GitHub ones. */
+    .app-icon,
+    .app-icon-img {
+        box-sizing: border-box;
+        width: 18px;
+        height: 18px;
+        /* Never let a long program name squash the icon and shift the text. */
+        flex: none;
+    }
+
     .app-icon {
         display: flex;
         align-items: center;
-    }
-
-    .fallback-icon {
-        margin-left: -20px;
+        justify-content: center;
+        /* Sized to sit inside the box; line-height 1 keeps the glyph's line
+           box from making the row taller than the image does. */
+        font-size: 15px;
+        line-height: 1;
     }
 
     .hidden {
@@ -235,8 +249,6 @@
     }
 
     .app-icon-img {
-        width: 16px;
-        height: 16px;
         border: 1px solid #000;
         object-fit: cover;
         image-rendering: auto;
