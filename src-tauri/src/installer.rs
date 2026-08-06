@@ -1,51 +1,102 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+struct IndexedApplicationDirectory {
+    path: PathBuf,
+    apps_by_name: HashMap<String, Vec<PathBuf>>,
+}
+
+/// One pass over the application directories, reusable for every app.
+///
+/// Checking N tracked programs used to mean N directory scans, because each
+/// `detect_installed_app` call re-read `/Applications` from scratch. Building
+/// the listing once and querying it turns that into a single pass.
+pub(crate) struct InstalledAppIndex {
+    directories: Vec<IndexedApplicationDirectory>,
+}
+
+impl InstalledAppIndex {
+    pub(crate) fn scan() -> Self {
+        let directories = application_directories()
+            .into_iter()
+            .map(|path| {
+                let entries = std::fs::read_dir(&path)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()));
+                index_application_directory(path, entries)
+            })
+            .collect();
+
+        Self { directories }
+    }
+
+    pub(crate) fn detect(&self, app_name: &str) -> Option<(String, String)> {
+        log::debug!("Searching app index for: {}", app_name);
+
+        for path in self.candidate_paths(app_name) {
+            log::debug!("Trying indexed path: {}", path.display());
+            let path_string = path.to_string_lossy().to_string();
+            if let Some(version) = get_app_version(&path_string) {
+                log::debug!("Found indexed app version: {}", version);
+                return Some((path_string, version));
+            }
+        }
+
+        log::debug!("No indexed match found for {}", app_name);
+        None
+    }
+
+    fn candidate_paths(&self, app_name: &str) -> Vec<PathBuf> {
+        let normalized_name = app_name.to_lowercase();
+        let mut paths = Vec::new();
+
+        for directory in &self.directories {
+            // Preserve the existing exact-before-case-insensitive lookup order
+            // within each application directory, so which bundle wins does not
+            // change just because the search got faster.
+            paths.push(directory.path.join(format!("{app_name}.app")));
+            if let Some(matches) = directory.apps_by_name.get(&normalized_name) {
+                paths.extend(matches.iter().cloned());
+            }
+        }
+
+        paths
+    }
+}
 
 /// Detect if an app is installed in /Applications or ~/Applications and get its version
 pub fn detect_installed_app(app_name: &str) -> Option<(String, String)> {
-    log::debug!("Searching for app: {}", app_name);
+    InstalledAppIndex::scan().detect(app_name)
+}
 
-    let mut app_dirs = vec!["/Applications".to_string()];
+fn application_directories() -> Vec<PathBuf> {
+    let mut directories = vec![PathBuf::from("/Applications")];
     if let Some(home) = dirs::home_dir() {
-        app_dirs.push(home.join("Applications").to_string_lossy().to_string());
+        directories.push(home.join("Applications"));
     }
+    directories
+}
 
-    for dir in &app_dirs {
-        // Try exact match first
-        let exact_path = format!("{}/{}.app", dir, app_name);
-        log::debug!("Trying exact path: {}", exact_path);
-
-        if let Some(version) = get_app_version(&exact_path) {
-            log::debug!("Found via exact match! Version: {}", version);
-            return Some((exact_path, version));
+fn index_application_directory(
+    path: PathBuf,
+    entries: impl IntoIterator<Item = PathBuf>,
+) -> IndexedApplicationDirectory {
+    let mut apps_by_name: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for entry in entries {
+        if entry.extension().and_then(|extension| extension.to_str()) != Some("app") {
+            continue;
         }
-
-        // Try case-insensitive search
-        log::debug!(
-            "Exact match failed, trying case-insensitive search in {}",
-            dir
-        );
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("app") {
-                    if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                        // Case-insensitive comparison
-                        if file_name.to_lowercase() == app_name.to_lowercase() {
-                            log::debug!("Match found: {}", file_name);
-                            if let Some(version) = get_app_version(&path.to_string_lossy()) {
-                                log::debug!("Version found: {}", version);
-                                return Some((path.to_string_lossy().to_string(), version));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(name) = entry.file_stem().and_then(|name| name.to_str()) {
+            apps_by_name
+                .entry(name.to_lowercase())
+                .or_default()
+                .push(entry);
         }
     }
 
-    log::debug!("No match found for {}", app_name);
-    None
+    IndexedApplicationDirectory { path, apps_by_name }
 }
 
 /// Locate the .app bundle the current process runs from and read its version,
@@ -111,8 +162,54 @@ fn get_app_version(app_path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::enclosing_bundle;
-    use std::path::Path;
+    use super::{enclosing_bundle, index_application_directory};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn indexed_matches_preserve_directory_and_exact_match_precedence() {
+        let directory = index_application_directory(
+            PathBuf::from("/Applications"),
+            [
+                PathBuf::from("/Applications/Thing.app"),
+                PathBuf::from("/Applications/Notes.txt"),
+                PathBuf::from("/Applications/Other.app"),
+            ],
+        );
+        let index = super::InstalledAppIndex {
+            directories: vec![directory],
+        };
+
+        let candidates = index.candidate_paths("Thing");
+
+        // The exact-cased path is tried first, exactly as the unindexed
+        // search did, so which bundle wins cannot change.
+        assert_eq!(candidates[0], PathBuf::from("/Applications/Thing.app"));
+        assert!(candidates.contains(&PathBuf::from("/Applications/Thing.app")));
+        // Non-.app entries are never indexed.
+        assert!(!candidates
+            .iter()
+            .any(|path| path.to_string_lossy().ends_with("Notes.txt")));
+    }
+
+    #[test]
+    fn indexed_matches_are_case_insensitive_but_name_specific() {
+        let directory = index_application_directory(
+            PathBuf::from("/Applications"),
+            [
+                PathBuf::from("/Applications/ThInG.app"),
+                PathBuf::from("/Applications/Thingamajig.app"),
+            ],
+        );
+        let index = super::InstalledAppIndex {
+            directories: vec![directory],
+        };
+
+        let candidates = index.candidate_paths("thing");
+
+        assert!(candidates.contains(&PathBuf::from("/Applications/ThInG.app")));
+        // A longer name that merely starts the same is not a match.
+        assert!(!candidates.contains(&PathBuf::from("/Applications/Thingamajig.app")));
+    }
 
     #[test]
     fn finds_enclosing_app_bundle() {

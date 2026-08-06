@@ -20,6 +20,11 @@ pub struct AppState {
 /// would hang the download forever.
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How many release lookups may be in flight during a batch check. Bounded
+/// rather than unlimited so a long list of tracked programs cannot open a
+/// connection per app at once, or trip a forge's rate limiting.
+const RELEASE_CHECK_CONCURRENCY: usize = 4;
+
 /// Holds the single global download slot for as long as it is alive, so a
 /// second download — for any app — is refused rather than racing the first.
 /// Released on drop, which covers the error and early-return paths too.
@@ -81,9 +86,12 @@ struct DownloadProgress {
 }
 
 /// Progress of a batch update check, for the frontend's modal progress
-/// dialog. Emitted before each app is checked, so `position - 1` apps are
-/// finished when the event arrives — a progress bar driven by that count
-/// never overstates completion.
+/// dialog. `position - 1` apps are finished when the event arrives, so a
+/// progress bar driven by that count never overstates completion — the
+/// invariant holds with several checks in flight because `position` is derived
+/// from how many have actually completed, not how many have been started.
+/// `app_name` is an app still outstanding, so the dialog names something that
+/// really is being worked on.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CheckProgress {
@@ -222,6 +230,9 @@ pub async fn check_for_updates(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<App>, String> {
+    // Only a batch check pays for indexing the application directories; a
+    // single-app check would scan them just to answer one question.
+    let is_batch = app_id.is_none();
     let apps = if let Some(id) = app_id {
         vec![state
             .storage
@@ -234,54 +245,97 @@ pub async fn check_for_updates(
 
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
     let total = apps.len();
-    let mut updated_apps = Vec::new();
 
-    for (index, mut app) in apps.into_iter().enumerate() {
-        // Fire-and-forget: progress display must never fail a check.
+    // Re-detect installed versions for every app in one pass, off the async
+    // runtime. This walks /Applications, which is blocking filesystem work: on
+    // the runtime it stalls the executor, and once per app it re-reads the
+    // same directories N times.
+    let detected = detect_apps_for_check(apps.clone(), is_batch).await?;
+    let names: Arc<Vec<String>> = Arc::new(apps.iter().map(|app| app.name.clone()).collect());
+    let pending: Vec<App> = apps
+        .into_iter()
+        .zip(detected)
+        .map(|(mut app, (current_version, install_path))| {
+            app.current_version = current_version;
+            app.install_path = install_path;
+            app
+        })
+        .collect();
+
+    // Fire-and-forget: progress display must never fail a check.
+    if total > 0 {
         let _ = app_handle.emit(
             "check-progress",
             CheckProgress {
-                position: index + 1,
+                position: 1,
                 total,
-                app_name: app.name.clone(),
+                app_name: names[0].clone(),
                 done: false,
             },
         );
-        // Re-detect installed version; clear stale state if the app was uninstalled
-        match crate::installer::detect_installed_app(&app.name) {
-            Some((path, version)) => {
-                app.current_version = Some(version);
-                app.install_path = Some(path);
-            }
-            // Obtainintosh itself is running right now, so it always has a
-            // current version — even without an /Applications install. Prefer
-            // the bundle the process runs from (stays accurate if that bundle
-            // is replaced on disk by an update); the compiled-in version is
-            // the fallback for dev builds outside a bundle.
-            None if crate::updates::is_self_app(&app) => {
-                let (path, version) = match crate::installer::detect_running_bundle() {
-                    Some((path, version)) => (Some(path), version),
-                    None => (None, env!("CARGO_PKG_VERSION").to_string()),
-                };
-                app.current_version = Some(version);
-                app.install_path = path;
-            }
-            None => {
-                app.current_version = None;
-                app.install_path = None;
-            }
-        }
+    }
 
-        let result = match app.source_type {
-            SourceType::GitHub => {
-                let adapter = GitHubAdapter::new(settings.github_token.clone());
-                adapter.get_latest_release(&app.source_url).await
+    let github_token = settings.github_token;
+    let finished = Arc::new(Mutex::new(vec![false; total]));
+    let checked = collect_bounded_ordered(
+        pending.iter().cloned().enumerate(),
+        RELEASE_CHECK_CONCURRENCY,
+        |(index, app)| {
+            let adapter = GitHubAdapter::new(github_token.clone());
+            let handle = app_handle.clone();
+            let finished = Arc::clone(&finished);
+            let names = Arc::clone(&names);
+            async move {
+                let result = match app.source_type {
+                    SourceType::GitHub => adapter.get_latest_release(&app.source_url).await,
+                    SourceType::Forgejo => {
+                        ForgejoAdapter::new(forge_credentials(&app))
+                            .get_latest_release(&app.source_url)
+                            .await
+                    }
+                    SourceType::GitLab => {
+                        Err(anyhow::anyhow!("GitLab support not yet implemented"))
+                    }
+                };
+
+                // Report against the count actually finished, so the dialog's
+                // `position - 1` still means "this many are done" with several
+                // checks in flight. The name is the earliest app still
+                // outstanding, which is one genuinely being worked on.
+                let (position, app_name) = {
+                    let mut flags = finished.lock().unwrap_or_else(|e| e.into_inner());
+                    flags[index] = true;
+                    let done_count = flags.iter().filter(|done| **done).count();
+                    let outstanding = flags.iter().position(|done| !*done);
+                    let name = names[outstanding.unwrap_or(index)].clone();
+                    ((done_count + 1).min(total), name)
+                };
+                let _ = handle.emit(
+                    "check-progress",
+                    CheckProgress {
+                        position,
+                        total,
+                        app_name,
+                        done: false,
+                    },
+                );
+
+                (app, result)
             }
-            SourceType::Forgejo => {
-                let adapter = ForgejoAdapter::new(forge_credentials(&app));
-                adapter.get_latest_release(&app.source_url).await
+        },
+    )
+    .await;
+
+    let mut updated_apps = Vec::with_capacity(total);
+    for (joined, original) in checked.into_iter().zip(pending) {
+        let (mut app, result) = match joined {
+            Ok(checked) => checked,
+            Err(error) => {
+                // The task died rather than returning an error. Keep the
+                // freshly detected state and carry on with the rest.
+                log::error!("Update check task failed for {}: {error}", original.name);
+                (original, Err(anyhow::anyhow!("Update check task failed")))
             }
-            SourceType::GitLab => Err(anyhow::anyhow!("GitLab support not yet implemented")),
         };
 
         match result {
@@ -475,6 +529,112 @@ pub async fn download_and_install(
         "Download finished: {}\n\n{reveal_message}",
         download_path.display()
     ))
+}
+
+/// Re-detects the installed version of every app in one blocking pass.
+///
+/// `use_shared_index` builds the directory listing once for the whole batch;
+/// a single-app check skips it and does the direct lookup instead.
+async fn detect_apps_for_check(
+    apps: Vec<App>,
+    use_shared_index: bool,
+) -> Result<Vec<(Option<String>, Option<String>)>, String> {
+    tokio::task::spawn_blocking(move || {
+        let index = use_shared_index.then(crate::installer::InstalledAppIndex::scan);
+        apps.iter()
+            .map(|app| {
+                let installed = match &index {
+                    Some(index) => index.detect(&app.name),
+                    None => crate::installer::detect_installed_app(&app.name),
+                };
+                match installed {
+                    Some((path, version)) => (Some(version), Some(path)),
+                    // Obtainintosh itself is running right now, so it always
+                    // has a current version — even without an /Applications
+                    // install. Prefer the bundle the process runs from (stays
+                    // accurate if that bundle is replaced on disk by an
+                    // update); the compiled-in version is the fallback for dev
+                    // builds outside a bundle.
+                    None if crate::updates::is_self_app(app) => {
+                        let (path, version) = match crate::installer::detect_running_bundle() {
+                            Some((path, version)) => (Some(path), version),
+                            None => (None, env!("CARGO_PKG_VERSION").to_string()),
+                        };
+                        (Some(version), path)
+                    }
+                    None => (None, None),
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("Installed-app detection failed: {error}"))
+}
+
+/// Runs `operation` over `inputs` with at most `limit` in flight, returning
+/// results in input order regardless of the order they finish in.
+///
+/// Ordering matters because the caller persists each result against the app it
+/// came from; matching them up by position is only sound if the positions are
+/// preserved.
+async fn collect_bounded_ordered<I, F, Fut, T>(
+    inputs: I,
+    limit: usize,
+    mut operation: F,
+) -> Vec<std::result::Result<T, tokio::task::JoinError>>
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> Fut,
+    Fut: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    assert!(limit > 0, "bounded operation limit must be positive");
+
+    let mut inputs = inputs.into_iter().enumerate();
+    let mut in_flight = tokio::task::JoinSet::new();
+    let mut task_indices = std::collections::HashMap::new();
+    let mut results = Vec::new();
+
+    for _ in 0..limit {
+        let Some((index, input)) = inputs.next() else {
+            break;
+        };
+        results.push(None);
+        let task = in_flight.spawn(operation(input));
+        task_indices.insert(task.id(), index);
+    }
+
+    while let Some(joined) = in_flight.join_next_with_id().await {
+        match joined {
+            Ok((task_id, result)) => {
+                let index = task_indices
+                    .remove(&task_id)
+                    .expect("completed bounded task must have an input index");
+                results[index] = Some(Ok(result));
+            }
+            Err(error) => {
+                // A panicked or cancelled task still owns its slot, so the
+                // failure lands against the input it came from rather than
+                // shifting every later result up by one.
+                let index = task_indices
+                    .remove(&error.id())
+                    .expect("failed bounded task must have an input index");
+                results[index] = Some(Err(error));
+            }
+        }
+
+        if let Some((next_index, input)) = inputs.next() {
+            results.push(None);
+            let task = in_flight.spawn(operation(input));
+            task_indices.insert(task.id(), next_index);
+        }
+    }
+
+    debug_assert!(task_indices.is_empty());
+    results
+        .into_iter()
+        .map(|result| result.expect("every bounded operation must complete"))
+        .collect()
 }
 
 /// Where a single download operation writes. Each operation gets its own
@@ -880,5 +1040,58 @@ mod tests {
         assert!(active_download.is_poisoned());
 
         assert!(InFlightDownloadGuard::acquire("App One (app-1)", active_download).is_ok());
+    }
+
+    #[tokio::test]
+    async fn bounded_operations_respect_the_limit_and_return_input_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let results = collect_bounded_ordered(0..20_usize, 4, |index| {
+            let in_flight = Arc::clone(&in_flight);
+            let peak = Arc::clone(&peak);
+            async move {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                // Yield so tasks genuinely overlap rather than running to
+                // completion one at a time.
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                index * 10
+            }
+        })
+        .await;
+
+        let values: Vec<usize> = results.into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(values, (0..20).map(|i| i * 10).collect::<Vec<_>>());
+        assert!(peak.load(Ordering::SeqCst) <= 4, "limit exceeded");
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "never actually ran concurrently"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_bounded_operation_keeps_its_input_slot() {
+        let results = collect_bounded_ordered(0..4_usize, 2, |index| async move {
+            if index == 1 {
+                panic!("task {index} fails");
+            }
+            index
+        })
+        .await;
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(*results[0].as_ref().unwrap(), 0);
+        // The failure stays at index 1 rather than shifting the rest up.
+        assert!(
+            results[1].is_err(),
+            "the panicking task should report an error"
+        );
+        assert_eq!(*results[2].as_ref().unwrap(), 2);
+        assert_eq!(*results[3].as_ref().unwrap(), 3);
     }
 }
