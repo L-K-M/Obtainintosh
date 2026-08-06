@@ -4,6 +4,64 @@ use serde::{Deserialize, Serialize};
 /// below, so a stray `{:?}` can't put an application key in the log.
 pub(crate) const REDACTED: &str = "[redacted]";
 
+/// How the last update check for an app turned out. Stored on the app so the
+/// UI can tell "checked, up to date" apart from "the check never completed" —
+/// which a bare `latest_version` cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckAttemptState {
+    Succeeded,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckAttempt {
+    pub attempted_at: String,
+    pub state: CheckAttemptState,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl CheckAttempt {
+    pub fn succeeded(attempted_at: String) -> Self {
+        Self {
+            attempted_at,
+            state: CheckAttemptState::Succeeded,
+            message: None,
+        }
+    }
+
+    pub fn unsuccessful(attempted_at: String, state: CheckAttemptState, message: &str) -> Self {
+        debug_assert!(state != CheckAttemptState::Succeeded);
+        Self {
+            attempted_at,
+            state,
+            message: Some(bounded_check_message(message)),
+        }
+    }
+}
+
+/// Collapses whitespace and caps length. These messages come from network and
+/// forge errors, go into the data file, and are rendered in a tooltip — none of
+/// which wants an unbounded multi-line string.
+pub fn bounded_check_message(message: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    const ELLIPSIS: &str = "...";
+
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+
+    let mut bounded = normalized
+        .chars()
+        .take(MAX_CHARS - ELLIPSIS.len())
+        .collect::<String>();
+    bounded.push_str(ELLIPSIS);
+    bounded
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceType {
@@ -34,6 +92,11 @@ pub struct App {
     pub install_path: Option<String>,
     #[serde(default)]
     pub last_checked: Option<String>, // ISO 8601 timestamp
+    /// The most recent check attempt, successful or not. `last_checked` only
+    /// moves on success, so this is what distinguishes a stale
+    /// `latest_version` from a current one.
+    #[serde(default)]
+    pub last_check_attempt: Option<CheckAttempt>,
     /// Credentials for a forge instance that needs them — currently only
     /// Forgejo, where a private instance rejects anonymous API reads. Stored
     /// per app rather than globally because every self-hosted instance issues
@@ -59,6 +122,7 @@ impl std::fmt::Debug for App {
             .field("latest_version", &self.latest_version)
             .field("install_path", &self.install_path)
             .field("last_checked", &self.last_checked)
+            .field("last_check_attempt", &self.last_check_attempt)
             .field("username", &self.username)
             .field(
                 "access_token",

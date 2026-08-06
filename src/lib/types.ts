@@ -1,6 +1,23 @@
 // TypeScript types matching Rust models
 
 export type SourceType = 'github' | 'gitlab' | 'forgejo';
+export type CheckAttemptState = 'succeeded' | 'failed' | 'unsupported';
+export type CheckOutcomeState = CheckAttemptState | 'skipped';
+
+/** How the last update check for an app turned out. */
+export interface CheckAttempt {
+  attempted_at: string;
+  state: CheckAttemptState;
+  message: string | null;
+}
+
+/** One app's result from a check run, reported back to the caller. */
+export interface CheckOutcome {
+  appId: string;
+  appName: string;
+  state: CheckOutcomeState;
+  message: string | null;
+}
 
 export interface App {
   id: string;
@@ -11,6 +28,8 @@ export interface App {
   latest_version: string | null;
   install_path: string | null;
   last_checked: string | null;
+  /** The most recent attempt, successful or not; null before the first check. */
+  last_check_attempt: CheckAttempt | null;
   /** Forgejo instance credentials; null for sources that need none. */
   username: string | null;
   access_token: string | null;

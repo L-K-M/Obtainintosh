@@ -16,6 +16,17 @@
     let iconIdentity = '';
 
     $: iconUrl = getIconUrl(app);
+    $: failedCheckHelp = getFailedCheckHelp(app);
+
+    // A failed check leaves any previously known latest version in place, so
+    // the tooltip has to say that the figure beside it is from an earlier run.
+    function getFailedCheckHelp(app: App): string {
+        const message = app.last_check_attempt?.message || 'The update check did not complete.';
+        if (app.latest_version) {
+            return `Last update check failed: ${message} The latest version shown is from an earlier successful check.`;
+        }
+        return `Last update check failed: ${message}`;
+    }
     $: {
         const nextIconIdentity = `${app.id}:${iconUrl ?? ''}`;
         if (nextIconIdentity !== iconIdentity) {
@@ -75,7 +86,21 @@
         {app.latest_version || '-'}
     </td>
     <td class="col-status">
-        {#if hasUpdate}
+        {#if app.last_check_attempt?.state === 'unsupported'}
+            <BalloonHelp message={app.last_check_attempt.message || 'This source cannot be checked for updates.'}>
+                <span class="status-badge missing">
+                    <img src={alertIcon} alt="Alert" class="alert-icon"/>
+                    Unsupported
+                </span>
+            </BalloonHelp>
+        {:else if app.last_check_attempt?.state === 'failed'}
+            <BalloonHelp message={failedCheckHelp}>
+                <span class="status-badge missing">
+                    <img src={alertIcon} alt="Alert" class="alert-icon"/>
+                    {app.latest_version ? 'Check Failed (Stale)' : 'Check Failed'}
+                </span>
+            </BalloonHelp>
+        {:else if hasUpdate}
             <span class="status-badge update">Update Available</span>
         {:else if !app.last_checked}
             <BalloonHelp message="This program hasn't been checked for updates yet.">

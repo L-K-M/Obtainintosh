@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { App, Settings, SourceInput, SystemColors } from './types';
+import type { App, CheckOutcome, Settings, SourceInput, SystemColors } from './types';
 
 export class TauriService {
     static async getAllApps(): Promise<App[]> {
@@ -18,7 +18,7 @@ export class TauriService {
         await invoke('remove_app', { id });
     }
 
-    static async checkForUpdates(appId?: string): Promise<App[]> {
+    static async checkForUpdates(appId?: string): Promise<CheckOutcome[]> {
         return await invoke('check_for_updates', { appId: appId || null });
     }
 
