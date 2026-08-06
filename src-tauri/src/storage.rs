@@ -1,8 +1,19 @@
 use crate::models::{App, AppData, Settings};
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// apps.json holds a GitHub token and, since Forgejo support, per-instance
+/// application keys. Nothing but the owner has any business reading either, so
+/// the directory and every file written into it are owner-only.
+#[cfg(unix)]
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 pub struct Storage {
     file_path: PathBuf,
@@ -28,6 +39,116 @@ fn seed_self_entry(data: &mut AppData) -> bool {
     true
 }
 
+/// Creates the support directory owner-only, and tightens it if a previous
+/// version (or the user) left it readable by others.
+fn prepare_storage_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(PRIVATE_DIRECTORY_MODE);
+        builder
+            .create(path)
+            .context("Failed to create application support directory")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
+            .context("Failed to secure application support directory")?;
+    }
+
+    #[cfg(not(unix))]
+    fs::create_dir_all(path).context("Failed to create application support directory")?;
+
+    Ok(())
+}
+
+fn tighten_storage_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+        .context("Failed to secure apps.json")?;
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+/// The scratch file an atomic save writes before renaming into place.
+///
+/// It matters that this is created fresh under a unique name rather than
+/// written to a fixed `apps.json.tmp`: `fs::write` follows symlinks, so a
+/// symlink sitting at a predictable temp path would redirect the save — tokens
+/// and all — wherever it pointed. `create_new` refuses to open anything that
+/// already exists, symlink included, and the name carries a UUID so two saves
+/// cannot pick the same one. The file is born with owner-only permissions
+/// instead of being tightened after the fact, so the contents are never briefly
+/// world-readable.
+struct PrivateTempFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+    cleanup: bool,
+}
+
+impl PrivateTempFile {
+    fn create(destination: &Path) -> io::Result<Self> {
+        let file_name = destination.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Storage path has no file name")
+        })?;
+        let mut options = fs::OpenOptions::new();
+        // Exclusive creation atomically rejects pre-existing files and symlinks.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(PRIVATE_FILE_MODE);
+
+        loop {
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            let path = destination.with_file_name(temp_name);
+            match options.open(&path) {
+                Ok(file) => {
+                    let temp = Self {
+                        path,
+                        file: Some(file),
+                        cleanup: true,
+                    };
+                    // The mode above applies only at creation, and umask can
+                    // still clear bits from it; set it explicitly as well.
+                    #[cfg(unix)]
+                    temp.file
+                        .as_ref()
+                        .unwrap()
+                        .set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+                    return Ok(temp);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_all(&mut self, contents: &[u8]) -> io::Result<()> {
+        self.file.as_mut().unwrap().write_all(contents)
+    }
+
+    fn replace(mut self, destination: &Path) -> io::Result<()> {
+        self.file.take();
+        fs::rename(&self.path, destination)?;
+        self.cleanup = false;
+        Ok(())
+    }
+}
+
+impl Drop for PrivateTempFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if self.cleanup {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 impl Storage {
     /// Loads (or initializes) the data file. Note the write side effect: the
     /// one-time self-entry seeding persists to apps.json, so constructing a
@@ -40,9 +161,7 @@ impl Storage {
             .join("Application Support")
             .join("Obtainintosh");
 
-        // Create directory if it doesn't exist
-        fs::create_dir_all(&app_support)
-            .context("Failed to create application support directory")?;
+        prepare_storage_directory(&app_support)?;
 
         Self::load_from_path(app_support.join("apps.json"))
     }
@@ -50,29 +169,45 @@ impl Storage {
     /// The half of `new` that does not depend on the user's home directory, so
     /// the load and recovery paths are testable against a temporary file.
     fn load_from_path(file_path: PathBuf) -> Result<Self> {
-        // Load existing data or create new
-        let mut data = if file_path.exists() {
-            let contents = fs::read(&file_path).context("Failed to read apps.json")?;
-            match serde_json::from_slice(&contents) {
-                Ok(data) => data,
-                // A file we cannot parse is not a reason to refuse to start —
-                // that would leave the user with an app that never opens again
-                // and no way to fix it from inside. Preserve the original
-                // bytes, then carry on from defaults.
-                Err(error) => {
-                    let backup_path = backup_corrupt_file(&file_path).with_context(|| {
-                        format!("Failed to preserve unreadable apps.json after: {error}")
-                    })?;
-                    log::error!(
-                        "Could not load persisted data at {} ({error}). The original file was preserved at {}. Starting with defaults.",
-                        file_path.display(),
-                        backup_path.display()
-                    );
-                    AppData::default()
+        // symlink_metadata rather than exists(): the check has to see the entry
+        // itself, not what it might point at.
+        let mut data = match fs::symlink_metadata(&file_path) {
+            Ok(metadata) => {
+                // Following a symlink here would write the user's tokens
+                // wherever it pointed, and a rename onto it would replace the
+                // link rather than its target. Neither is a state to guess at.
+                if metadata.file_type().is_symlink() {
+                    anyhow::bail!("Refusing to use apps.json because it is a symbolic link");
+                }
+                if !metadata.file_type().is_file() {
+                    anyhow::bail!("Refusing to use apps.json because it is not a regular file");
+                }
+
+                // A file written by an earlier version predates these
+                // permissions; tighten it on the way in.
+                tighten_storage_file_permissions(&file_path)?;
+                let contents = fs::read(&file_path).context("Failed to read apps.json")?;
+                match serde_json::from_slice(&contents) {
+                    Ok(data) => data,
+                    // A file we cannot parse is not a reason to refuse to start
+                    // — that would leave the user with an app that never opens
+                    // again and no way to fix it from inside. Preserve the
+                    // original bytes, then carry on from defaults.
+                    Err(error) => {
+                        let backup_path = backup_corrupt_file(&file_path).with_context(|| {
+                            format!("Failed to preserve unreadable apps.json after: {error}")
+                        })?;
+                        log::error!(
+                            "Could not load persisted data at {} ({error}). The original file was preserved at {}. Starting with defaults.",
+                            file_path.display(),
+                            backup_path.display()
+                        );
+                        AppData::default()
+                    }
                 }
             }
-        } else {
-            AppData::default()
+            Err(error) if error.kind() == io::ErrorKind::NotFound => AppData::default(),
+            Err(error) => return Err(error).context("Failed to inspect apps.json"),
         };
 
         let seeded = seed_self_entry(&mut data);
@@ -96,10 +231,13 @@ impl Storage {
     fn persist(&self, data: &AppData) -> Result<()> {
         let json = serde_json::to_string_pretty(data).context("Failed to serialize data")?;
 
-        // Atomic write: write to temp file then rename
-        let temp_path = self.file_path.with_extension("json.tmp");
-        fs::write(&temp_path, json).context("Failed to write temp file")?;
-        fs::rename(&temp_path, &self.file_path).context("Failed to rename temp file")?;
+        // Atomic write: write to a private sibling file then rename.
+        let mut temp =
+            PrivateTempFile::create(&self.file_path).context("Failed to write temp file")?;
+        temp.write_all(json.as_bytes())
+            .context("Failed to write temp file")?;
+        temp.replace(&self.file_path)
+            .context("Failed to rename temp file")?;
 
         Ok(())
     }
@@ -247,6 +385,205 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// Every scratch file a save could have left behind next to `file_path`.
+    fn storage_temp_paths(file_path: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", file_path.file_name().unwrap().to_string_lossy());
+        let mut paths = fs::read_dir(file_path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name.starts_with(&prefix) && name.ends_with(".tmp")).then_some(path)
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_directory_is_owner_only_when_created_or_tightened() {
+        let temp_dir = TestDir::new();
+        let new_path = temp_dir.path().join("new").join("Obtainintosh");
+        prepare_storage_directory(&new_path).unwrap();
+        assert_eq!(mode(&new_path), PRIVATE_DIRECTORY_MODE);
+
+        let existing_path = temp_dir.path().join("existing");
+        fs::create_dir(&existing_path).unwrap();
+        set_mode(&existing_path, 0o777);
+        prepare_storage_directory(&existing_path).unwrap();
+        assert_eq!(mode(&existing_path), PRIVATE_DIRECTORY_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_tightens_an_existing_apps_file_without_rewriting_it() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        let original = serde_json::to_vec(&data).unwrap();
+        fs::write(&file_path, &original).unwrap();
+        set_mode(&file_path, 0o666);
+
+        Storage::load_from_path(file_path.clone()).unwrap();
+
+        assert_eq!(fs::read(&file_path).unwrap(), original);
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_rejects_an_apps_symlink_without_touching_its_target() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let target_path = temp_dir.path().join("target.json");
+        let data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        let original = serde_json::to_vec(&data).unwrap();
+        fs::write(&target_path, &original).unwrap();
+        set_mode(&target_path, 0o640);
+        std::os::unix::fs::symlink(&target_path, &file_path).unwrap();
+
+        let error = Storage::load_from_path(file_path.clone())
+            .map(|_| ())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Refusing to use apps.json because it is a symbolic link"
+        );
+        assert_eq!(fs::read(&target_path).unwrap(), original);
+        assert_eq!(mode(&target_path), 0o640);
+        assert!(fs::symlink_metadata(&file_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!temp_dir.path().join("apps.json.corrupt-backup").exists());
+    }
+
+    #[test]
+    fn startup_rejects_a_non_regular_apps_path() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        fs::create_dir(&file_path).unwrap();
+
+        let error = Storage::load_from_path(file_path).map(|_| ()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Refusing to use apps.json because it is not a regular file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rewrite_replaces_a_loose_apps_file_with_an_owner_only_file() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        fs::write(&file_path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let storage = Storage::load_from_path(file_path.clone()).unwrap();
+        set_mode(&file_path, 0o666);
+
+        storage
+            .update_settings(Settings {
+                github_token: Some("secret".to_string()),
+                gitlab_token: None,
+            })
+            .unwrap();
+
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+        assert!(storage_temp_paths(&file_path).is_empty());
+    }
+
+    #[test]
+    fn private_temp_files_are_unique_siblings_and_cleanup_on_drop() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let first = PrivateTempFile::create(&file_path).unwrap();
+        let second = PrivateTempFile::create(&file_path).unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(first_path.parent(), file_path.parent());
+        assert_eq!(second_path.parent(), file_path.parent());
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&first_path), PRIVATE_FILE_MODE);
+            assert_eq!(mode(&second_path), PRIVATE_FILE_MODE);
+        }
+        assert_eq!(storage_temp_paths(&file_path).len(), 2);
+
+        drop(first);
+        drop(second);
+        assert!(storage_temp_paths(&file_path).is_empty());
+    }
+
+    /// The regression this whole type exists for: the old save wrote to a
+    /// fixed `apps.json.tmp` with `fs::write`, which follows symlinks.
+    #[cfg(unix)]
+    #[test]
+    fn fixed_temp_symlink_is_not_followed() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let fixed_temp_path = file_path.with_extension("json.tmp");
+        let victim_path = temp_dir.path().join("victim");
+        fs::write(&victim_path, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim_path, &fixed_temp_path).unwrap();
+        let storage = Storage {
+            file_path: file_path.clone(),
+            data: Mutex::new(AppData::default()),
+        };
+
+        storage.persist(&AppData::default()).unwrap();
+
+        assert_eq!(fs::read(&victim_path).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&fixed_temp_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(storage_temp_paths(&file_path), vec![fixed_temp_path]);
+        assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+    }
+
+    #[test]
+    fn failed_atomic_replacement_cleans_unique_temp_file() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        fs::create_dir(&file_path).unwrap();
+        let storage = Storage {
+            file_path: file_path.clone(),
+            data: Mutex::new(AppData::default()),
+        };
+
+        let error = storage.persist(&AppData::default()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("rename"),
+            "unexpected error: {error}"
+        );
+        assert!(storage_temp_paths(&file_path).is_empty());
+    }
+
     /// A storage whose file lives under a directory that does not exist, so
     /// every write fails. Lets the rollback tests drive the failure path
     /// without depending on filesystem permissions.
@@ -375,11 +712,21 @@ mod tests {
         let file_path = temp_dir.path().join("apps.json");
         let malformed = b"{ not valid json";
         fs::write(&file_path, malformed).unwrap();
+        #[cfg(unix)]
+        set_mode(&file_path, 0o666);
 
         let storage = Storage::load_from_path(file_path.clone()).unwrap();
 
         let backup_path = temp_dir.path().join("apps.json.corrupt-backup");
-        assert_eq!(fs::read(backup_path).unwrap(), malformed);
+        assert_eq!(fs::read(&backup_path).unwrap(), malformed);
+        // The file is tightened before it is read, so the hard link that
+        // preserves it inherits owner-only permissions rather than the 0666 it
+        // was found with.
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&backup_path), PRIVATE_FILE_MODE);
+            assert_eq!(mode(&file_path), PRIVATE_FILE_MODE);
+        }
         assert!(storage
             .get_all_apps()
             .unwrap()
