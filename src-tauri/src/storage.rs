@@ -153,6 +153,45 @@ mod tests {
     use crate::models::{App, SourceType};
 
     #[test]
+    fn loads_a_data_file_written_before_forgejo_support() {
+        // The credential fields were added to `App` after these files were
+        // written, so an upgrade must not fail to parse its own apps.json.
+        let stored = r#"{
+            "apps": [
+                {
+                    "id": "abc",
+                    "name": "Obtainintosh",
+                    "source_type": "github",
+                    "source_url": "https://github.com/L-K-M/Obtainintosh",
+                    "current_version": "1.2.1",
+                    "latest_version": null,
+                    "install_path": null,
+                    "last_checked": null
+                }
+            ],
+            "settings": {"github_token": null, "gitlab_token": null},
+            "self_entry_seeded": true
+        }"#;
+
+        let data: AppData = serde_json::from_str(stored).unwrap();
+        assert_eq!(data.apps.len(), 1);
+        assert!(data.apps[0].username.is_none());
+        assert!(data.apps[0].access_token.is_none());
+    }
+
+    #[test]
+    fn app_debug_output_redacts_the_application_key() {
+        let mut app = crate::updates::self_app_entry();
+        app.username = Some("alice".to_string());
+        app.access_token = Some("key123".to_string());
+
+        let rendered = format!("{:?}", app);
+        assert!(!rendered.contains("key123"), "leaked the key: {rendered}");
+        assert!(rendered.contains(crate::models::REDACTED), "{rendered}");
+        assert!(rendered.contains("alice"), "{rendered}");
+    }
+
+    #[test]
     fn seeds_self_entry_into_fresh_data() {
         let mut data = AppData::default();
         assert!(seed_self_entry(&mut data));
@@ -192,6 +231,8 @@ mod tests {
                 latest_version: None,
                 install_path: None,
                 last_checked: None,
+                username: None,
+                access_token: None,
             });
             assert!(seed_self_entry(&mut data)); // still marks the file as seeded
             assert_eq!(data.apps.len(), 1, "duplicated for {}", source_url);

@@ -1,6 +1,6 @@
 // TypeScript types matching Rust models
 
-export type SourceType = 'github' | 'gitlab';
+export type SourceType = 'github' | 'gitlab' | 'forgejo';
 
 export interface App {
   id: string;
@@ -11,6 +11,19 @@ export interface App {
   latest_version: string | null;
   install_path: string | null;
   last_checked: string | null;
+  /** Forgejo instance credentials; null for sources that need none. */
+  username: string | null;
+  access_token: string | null;
+}
+
+/** What the Add/Edit Program dialog collects about a tracked program. */
+export interface SourceInput {
+  url: string;
+  name: string;
+  /** `null` leaves the forge for the backend to detect from the URL. */
+  sourceType: SourceType | null;
+  username: string | null;
+  accessToken: string | null;
 }
 
 export interface Settings {

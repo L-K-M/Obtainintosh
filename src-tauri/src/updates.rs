@@ -37,6 +37,8 @@ pub(crate) fn self_app_entry() -> App {
         latest_version: None,
         install_path: None,
         last_checked: None,
+        username: None,
+        access_token: None,
     }
 }
 

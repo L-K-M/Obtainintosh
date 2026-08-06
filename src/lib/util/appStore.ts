@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { App } from '$lib/types';
+import type { App, SourceInput } from '$lib/types';
 import { TauriService } from '$lib/tauri';
 import { getErrorMessage } from '$lib/util/errors';
 import { notifications } from './notifications';
@@ -34,13 +34,13 @@ function createAppStore() {
             }
         },
 
-        addApp: async (url: string, name: string) => {
+        addApp: async (input: SourceInput) => {
             update(s => ({ ...s, loading: true, error: null }));
             try {
-                await TauriService.addApp(url, name);
+                await TauriService.addApp(input);
                 const apps = await TauriService.getAllApps();
                 update(s => ({ ...s, apps, loading: false }));
-                notifications.add(`App "${name}" added successfully`, 'success');
+                notifications.add(`App "${input.name}" added successfully`, 'success');
                 return true;
             } catch (e) {
                 const error = getErrorMessage(e, 'Failed to add program');
