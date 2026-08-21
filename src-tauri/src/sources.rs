@@ -1877,6 +1877,44 @@ mod tests {
         }
     }
 
+    /// Obtainintosh tracks itself, so its own release has to be readable by
+    /// every build it ships. These are the exact file names the release
+    /// workflow produces (Tauri's `<Product>_<version>_<arch>` naming for the
+    /// Linux bundles, tauri-action's for the macOS ones) — if a bundle target
+    /// or naming convention changes, the app stops seeing its own updates,
+    /// which is precisely the failure nobody notices until a release is out.
+    #[test]
+    fn test_obtainintoshs_own_release_assets_are_readable_on_every_shipped_build() {
+        let assets = vec![
+            asset("Obtainintosh_1.6.0_aarch64.dmg"),
+            asset("Obtainintosh_1.6.0_x64.dmg"),
+            asset("Obtainintosh_1.6.0_amd64.deb"),
+            asset("Obtainintosh_1.6.0_amd64.AppImage"),
+        ];
+
+        // The Linux builds are x86_64-only, and the .deb is preferred there.
+        assert_eq!(
+            find_linux_asset_for_arch(&assets, CpuArch::X86_64)
+                .unwrap()
+                .name,
+            "Obtainintosh_1.6.0_amd64.deb"
+        );
+        // Each Mac gets its own architecture's disk image, and never a Linux
+        // package — the extension gate keeps .deb/.AppImage out entirely.
+        assert_eq!(
+            find_macos_asset_for_arch(&assets, CpuArch::Arm64)
+                .unwrap()
+                .name,
+            "Obtainintosh_1.6.0_aarch64.dmg"
+        );
+        assert_eq!(
+            find_macos_asset_for_arch(&assets, CpuArch::X86_64)
+                .unwrap()
+                .name,
+            "Obtainintosh_1.6.0_x64.dmg"
+        );
+    }
+
     #[test]
     fn test_linux32_is_never_chosen_over_a_64_bit_build() {
         // The legacy naming pair: both carry a Linux marker and neither spells
