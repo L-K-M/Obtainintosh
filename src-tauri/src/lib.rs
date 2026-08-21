@@ -31,7 +31,7 @@ pub fn run() {
                 active_download: Arc::new(Default::default()),
             });
 
-            // Create custom menu items
+            // Create custom menu items, shared by both platforms' menus
             let add_app =
                 MenuItem::with_id(app, "add_app", "Add App...", true, Some("CmdOrCtrl+N"))?;
             let check_all =
@@ -42,60 +42,92 @@ pub fn run() {
             // Create custom About menu item (instead of PredefinedMenuItem::about)
             let about = MenuItem::with_id(app, "about", "About Obtainintosh", true, None::<&str>)?;
 
-            // Create the app submenu (Obtainintosh menu)
-            let app_submenu = Submenu::with_items(
-                app,
-                "Obtainintosh",
-                true,
-                &[
-                    &about,
-                    &PredefinedMenuItem::separator(app)?,
-                    &add_app,
-                    &check_all,
-                    &PredefinedMenuItem::separator(app)?,
-                    &settings,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
-                    &PredefinedMenuItem::show_all(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
-                ],
-            )?;
+            // macOS gets the full native menu bar with the standard app,
+            // Edit, and Window menus.
+            #[cfg(target_os = "macos")]
+            let menu = {
+                // Create the app submenu (Obtainintosh menu)
+                let app_submenu = Submenu::with_items(
+                    app,
+                    "Obtainintosh",
+                    true,
+                    &[
+                        &about,
+                        &PredefinedMenuItem::separator(app)?,
+                        &add_app,
+                        &check_all,
+                        &PredefinedMenuItem::separator(app)?,
+                        &settings,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::services(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::hide(app, None)?,
+                        &PredefinedMenuItem::hide_others(app, None)?,
+                        &PredefinedMenuItem::show_all(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::quit(app, None)?,
+                    ],
+                )?;
 
-            // Create Edit menu for standard edit operations
-            let edit_submenu = Submenu::with_items(
-                app,
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
-                ],
-            )?;
+                // Create Edit menu for standard edit operations
+                let edit_submenu = Submenu::with_items(
+                    app,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(app, None)?,
+                        &PredefinedMenuItem::redo(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::cut(app, None)?,
+                        &PredefinedMenuItem::copy(app, None)?,
+                        &PredefinedMenuItem::paste(app, None)?,
+                        &PredefinedMenuItem::select_all(app, None)?,
+                    ],
+                )?;
 
-            // Create Window menu
-            let window_submenu = Submenu::with_items(
-                app,
-                "Window",
-                true,
-                &[
-                    &PredefinedMenuItem::minimize(app, None)?,
-                    &PredefinedMenuItem::maximize(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::close_window(app, None)?,
-                ],
-            )?;
+                // Create Window menu
+                let window_submenu = Submenu::with_items(
+                    app,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(app, None)?,
+                        &PredefinedMenuItem::maximize(app, None)?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::close_window(app, None)?,
+                    ],
+                )?;
 
-            // Build the menu
-            let menu = Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?;
+                Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?
+            };
+
+            // Elsewhere the menu bar renders inside the window, so it stays
+            // small: one File menu carrying the app's actions and an explicit
+            // Quit (a custom item — the predefined macOS roles like Services
+            // or Hide mean nothing to GTK). Clipboard shortcuts come from the
+            // webview itself, so no Edit menu is needed.
+            #[cfg(not(target_os = "macos"))]
+            let menu = {
+                let quit = MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?;
+                let file_submenu = Submenu::with_items(
+                    app,
+                    "File",
+                    true,
+                    &[
+                        &add_app,
+                        &check_all,
+                        &PredefinedMenuItem::separator(app)?,
+                        &settings,
+                        &PredefinedMenuItem::separator(app)?,
+                        &about,
+                        &PredefinedMenuItem::separator(app)?,
+                        &quit,
+                    ],
+                )?;
+
+                Menu::with_items(app, &[&file_submenu])?
+            };
+
             app.set_menu(menu)?;
 
             Ok(())
@@ -120,6 +152,11 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.emit("menu-about", ());
                 }
+            }
+            // Only the non-macOS menu carries a custom Quit item; macOS uses
+            // the predefined one, which never reaches this handler.
+            "quit" => {
+                app.exit(0);
             }
             _ => {}
         })

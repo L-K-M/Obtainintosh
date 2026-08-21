@@ -177,10 +177,11 @@ impl Storage {
     /// Storage can mutate the real data file — anything building a Storage
     /// against a user's environment (tests, fixtures) inherits that.
     pub fn new() -> Result<Self> {
-        let app_support = dirs::home_dir()
-            .context("Failed to get home directory")?
-            .join("Library")
-            .join("Application Support")
+        // The platform's per-user data directory: `~/Library/Application
+        // Support` on macOS (unchanged from when the path was spelled out
+        // here), `$XDG_DATA_HOME` or `~/.local/share` on Linux.
+        let app_support = dirs::data_dir()
+            .context("Failed to get the user data directory")?
             .join("Obtainintosh");
 
         prepare_storage_directory(&app_support)?;

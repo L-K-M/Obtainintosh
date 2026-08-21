@@ -107,7 +107,7 @@
                 <span class="status-badge not-checked">Not Checked</span>
             </BalloonHelp>
         {:else if !app.latest_version}
-            <BalloonHelp message="No Mac version for this application was found.">
+            <BalloonHelp message="No version of this application compatible with this computer was found.">
                 <span class="status-badge missing">
                     <img src={alertIcon} alt="Alert" class="alert-icon"/>
                     Not Found

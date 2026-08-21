@@ -1,20 +1,20 @@
 [
   {
     "tag_name": "v5.0.0",
-    "body": "Stable Linux release",
+    "body": "Stable release for another platform",
     "draft": false,
     "prerelease": false,
     "assets": [
       {
-        "name": "tool-linux-x86_64.tar.gz",
-        "browser_download_url": "https://example.invalid/tool-v5.0.0.tar.gz",
+        "name": "tool-windows-x64.zip",
+        "browser_download_url": "https://example.invalid/tool-v5.0.0.zip",
         "size": 500
       }
     ]
   },
   {
     "tag_name": "v5.1.0-beta.1",
-    "body": "Compatible Mac prerelease",
+    "body": "Compatible prerelease",
     "draft": false,
     "prerelease": true,
     "assets": [
@@ -22,18 +22,28 @@
         "name": "tool-macos-universal.dmg",
         "browser_download_url": "https://example.invalid/tool-v5.1.0-beta.1.dmg",
         "size": 510
+      },
+      {
+        "name": "tool.AppImage",
+        "browser_download_url": "https://example.invalid/tool-v5.1.0-beta.1.AppImage",
+        "size": 510
       }
     ]
   },
   {
     "tag_name": "v5.0.1",
-    "body": "Draft Mac release",
+    "body": "Draft release",
     "draft": true,
     "prerelease": false,
     "assets": [
       {
         "name": "tool-macos-universal.dmg",
         "browser_download_url": "https://example.invalid/tool-v5.0.1.dmg",
+        "size": 501
+      },
+      {
+        "name": "tool.AppImage",
+        "browser_download_url": "https://example.invalid/tool-v5.0.1.AppImage",
         "size": 501
       }
     ]

@@ -4,6 +4,13 @@ use serde::Deserialize;
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
+/// The platform this build picks release assets for, as named in user-facing
+/// messages ("No macOS-compatible asset found").
+#[cfg(target_os = "macos")]
+const PLATFORM_LABEL: &str = "macOS";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_LABEL: &str = "Linux";
+
 /// Canonical form for "is this the same repository?" comparisons: lowercased
 /// first (so `.GIT` trims like `.git`), query string and fragment dropped
 /// (like `parse_github_url` does), then stripped of a trailing slash and
@@ -55,8 +62,8 @@ struct ForgeRelease {
     prerelease: bool,
 }
 
-/// How far back to look when the newest release carries nothing this Mac can
-/// install. Matches the page size both forges are asked for.
+/// How far back to look when the newest release carries nothing this machine
+/// can install. Matches the page size both forges are asked for.
 const RECENT_RELEASE_LIMIT: usize = 10;
 
 #[derive(Debug, Deserialize)]
@@ -67,10 +74,12 @@ struct ReleaseAsset {
 }
 
 impl ForgeRelease {
-    /// Turns the forge's release into ours, picking the asset this Mac can use.
+    /// Turns the forge's release into ours, picking the asset this machine can
+    /// use.
     fn build_release(&self) -> Result<Release> {
-        let asset = find_macos_asset(&self.assets)
-            .context("Selected release has no macOS-compatible asset")?;
+        let asset = find_compatible_asset(&self.assets).with_context(|| {
+            format!("Selected release has no {PLATFORM_LABEL}-compatible asset")
+        })?;
 
         Ok(Release {
             version: clean_version_tag(&self.tag_name),
@@ -82,20 +91,20 @@ impl ForgeRelease {
         })
     }
 
-    fn has_macos_asset(&self) -> bool {
-        find_macos_asset(&self.assets).is_some()
+    fn has_compatible_asset(&self) -> bool {
+        find_compatible_asset(&self.assets).is_some()
     }
 }
 
-/// Picks a release this Mac can actually install out of the recent list.
+/// Picks a release this machine can actually install out of the recent list.
 ///
 /// Whether the forge had a nominal latest release at all decides how much
 /// freedom there is. Both forges' `releases/latest` returns the newest
 /// published, non-prerelease release, so when it answered, the repository does
 /// publish a stable channel and that is the channel the user is tracking.
 /// Quietly moving them onto a prerelease because the stable build happened to
-/// ship Linux-only assets would change what they are subscribed to without
-/// saying so, hence the restriction to stable there.
+/// ship assets for other platforms only would change what they are subscribed
+/// to without saying so, hence the restriction to stable there.
 ///
 /// When it 404s there is no such expectation to protect, and the reason is not
 /// knowable from here — a repository that only ever publishes prereleases, one
@@ -109,23 +118,24 @@ fn select_recent_release(
     if stable_release_published {
         return find_compatible_release(releases, Some(false)).with_context(|| {
             format!(
-                "No macOS-compatible stable release found in the {} most recent releases",
-                RECENT_RELEASE_LIMIT
+                "No {}-compatible stable release found in the {} most recent releases",
+                PLATFORM_LABEL, RECENT_RELEASE_LIMIT
             )
         });
     }
 
     find_compatible_release(releases, None).with_context(|| {
         format!(
-            "No macOS-compatible release found in the {} most recent releases",
-            RECENT_RELEASE_LIMIT
+            "No {}-compatible release found in the {} most recent releases",
+            PLATFORM_LABEL, RECENT_RELEASE_LIMIT
         )
     })
 }
 
-/// The newest published release carrying an asset this Mac can use, optionally
-/// restricted to one channel. Drafts are unpublished and never count. The list
-/// arrives newest-first from both forges, so the first match is the newest.
+/// The newest published release carrying an asset this machine can use,
+/// optionally restricted to one channel. Drafts are unpublished and never
+/// count. The list arrives newest-first from both forges, so the first match
+/// is the newest.
 fn find_compatible_release(
     releases: &[ForgeRelease],
     prerelease: Option<bool>,
@@ -133,7 +143,7 @@ fn find_compatible_release(
     releases.iter().find(|release| {
         !release.draft
             && prerelease.is_none_or(|wanted| release.prerelease == wanted)
-            && release.has_macos_asset()
+            && release.has_compatible_asset()
     })
 }
 
@@ -141,14 +151,65 @@ pub struct GitHubAdapter {
     token: Option<String>,
 }
 
+/// The CPU the running build targets. Shared by the macOS and Linux asset
+/// pickers — both platforms ship for exactly these two architectures.
 #[derive(Clone, Copy)]
-enum MacArch {
-    AppleSilicon,
+enum CpuArch {
+    Arm64,
     X86_64,
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-compile_error!("macOS asset selection supports only aarch64 and x86_64 targets");
+compile_error!("release asset selection supports only aarch64 and x86_64 targets");
+
+fn target_cpu_arch() -> CpuArch {
+    if cfg!(target_arch = "aarch64") {
+        CpuArch::Arm64
+    } else {
+        CpuArch::X86_64
+    }
+}
+
+/// CPU families no supported build can run, spelled the ways release assets
+/// actually name them (including Debian architecture names like `ppc64el` and
+/// `armel` — the boundary check in `has_name_marker` means `ppc64` does not
+/// match inside `ppc64el`, so the long forms need their own entries).
+/// One shared list for both pickers, so an architecture learned on one
+/// platform cannot silently stay accepted on the other. Bare `x86` is absent
+/// on purpose: `_` and `-` are marker boundaries, so it would also match
+/// inside `x86_64` and `x86-64` and reject every 64-bit Intel asset.
+const UNSUPPORTED_CPU_MARKERS: &[&str] = &[
+    "armv5",
+    "armv6",
+    "armv7",
+    "armel",
+    "armhf",
+    "i386",
+    "i486",
+    "i586",
+    "i686",
+    "i786",
+    "x86_32",
+    "x86-32",
+    // 32-bit x86 by long-standing convention, like the win32/linux32 pairing.
+    "linux32",
+    "powerpc",
+    "ppc",
+    "ppc64",
+    "ppc64el",
+    "ppc64le",
+    "mips",
+    "mipsel",
+    "mips64",
+    "mips64el",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "riscv32",
+    "riscv64",
+    "loongarch64",
+    "loong64",
+];
 
 impl GitHubAdapter {
     pub fn new(token: Option<String>) -> Self {
@@ -200,12 +261,12 @@ impl GitHubAdapter {
         };
 
         // The nominal latest release is only usable if it ships something this
-        // Mac can install. A project that publishes a source-only or
-        // Linux-only point release would otherwise make the app report no
-        // compatible asset at all, even with a perfectly good build one
-        // release back.
+        // machine can install. A project that publishes a source-only point
+        // release, or one built for other platforms only, would otherwise make
+        // the app report no compatible asset at all, even with a perfectly
+        // good build one release back.
         if let Some(release) = latest.as_ref() {
-            if release.has_macos_asset() {
+            if release.has_compatible_asset() {
                 return release.build_release();
             }
         }
@@ -319,7 +380,7 @@ impl ForgejoAdapter {
         };
 
         if let Some(release) = latest.as_ref() {
-            if release.has_macos_asset() {
+            if release.has_compatible_asset() {
                 return release.build_release();
             }
         }
@@ -568,19 +629,22 @@ fn same_origin(a: &str, b: &str) -> bool {
     }
 }
 
-fn find_macos_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
-    let target_arch = if cfg!(target_arch = "aarch64") {
-        MacArch::AppleSilicon
+/// The release asset the platform this build runs on can install, if any.
+///
+/// Dispatches with `cfg!` rather than `#[cfg]` so both platform pickers are
+/// compiled — and their tests run — everywhere; the unused one is eliminated
+/// as dead code in release builds.
+fn find_compatible_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
+    if cfg!(target_os = "macos") {
+        find_macos_asset_for_arch(assets, target_cpu_arch())
     } else {
-        MacArch::X86_64
-    };
-
-    find_macos_asset_for_arch(assets, target_arch)
+        find_linux_asset_for_arch(assets, target_cpu_arch())
+    }
 }
 
 fn find_macos_asset_for_arch(
     assets: &[ReleaseAsset],
-    target_arch: MacArch,
+    target_arch: CpuArch,
 ) -> Option<&ReleaseAsset> {
     log::debug!("Finding macOS asset from {} candidates", assets.len());
     let extensions = [".dmg", ".pkg", ".app.tar.gz", ".tar.gz", ".zip"];
@@ -622,15 +686,12 @@ fn find_macos_asset_for_arch(
             let intel64 = ["x86_64", "x86-64", "amd64", "x64", "intel"]
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
-            let unsupported_cpu = [
-                "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786", "x86_32",
-                "x86-32", "powerpc", "ppc64", "riscv64",
-            ]
-            .iter()
-            .any(|marker| has_name_marker(&name, marker));
+            let unsupported_cpu = UNSUPPORTED_CPU_MARKERS
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
 
             if unsupported_cpu
-                || matches!(target_arch, MacArch::X86_64) && arm64 && !intel64 && !universal
+                || matches!(target_arch, CpuArch::X86_64) && arm64 && !intel64 && !universal
             {
                 return None;
             }
@@ -638,13 +699,13 @@ fn find_macos_asset_for_arch(
             // Intel-only builds remain a last-resort option on Apple Silicon because
             // Rosetta 2 can run them. The reverse is not possible on x86_64 Macs.
             let architecture_rank = match target_arch {
-                MacArch::AppleSilicon if universal => 0,
-                MacArch::AppleSilicon if arm64 => 1,
-                MacArch::AppleSilicon if !intel64 => 2,
-                MacArch::AppleSilicon => 3,
-                MacArch::X86_64 if universal => 0,
-                MacArch::X86_64 if intel64 => 1,
-                MacArch::X86_64 => 2,
+                CpuArch::Arm64 if universal => 0,
+                CpuArch::Arm64 if arm64 => 1,
+                CpuArch::Arm64 if !intel64 => 2,
+                CpuArch::Arm64 => 3,
+                CpuArch::X86_64 if universal => 0,
+                CpuArch::X86_64 if intel64 => 1,
+                CpuArch::X86_64 => 2,
             };
 
             Some((asset, (architecture_rank, package_rank)))
@@ -656,7 +717,7 @@ fn find_macos_asset_for_arch(
         });
 
     match selected {
-        Some((asset, (3, _))) if matches!(target_arch, MacArch::AppleSilicon) => {
+        Some((asset, (3, _))) if matches!(target_arch, CpuArch::Arm64) => {
             log::warn!(
                 "Selected Intel-only macOS asset for Apple Silicon; Rosetta 2 is required: {}",
                 asset.name
@@ -665,6 +726,108 @@ fn find_macos_asset_for_arch(
         }
         Some((asset, _)) => {
             log::debug!("Selected compatible macOS asset: {}", asset.name);
+            Some(asset)
+        }
+        None => {
+            log::debug!("No suitable asset found");
+            None
+        }
+    }
+}
+
+/// The Linux counterpart of `find_macos_asset_for_arch`, sharing its shape:
+/// filter by package format and filename markers, then rank by (architecture,
+/// package format) with the asset name as the tiebreaker.
+///
+/// `.deb` ranks first because it is the native package on the Ubuntu systems
+/// this build targets, ahead of the distribution-independent `.AppImage`.
+/// `.rpm` is deliberately not accepted — it is a Linux format, but not one an
+/// Ubuntu system installs. Generic archives need a Linux marker in the
+/// filename, exactly like generic archives need a macOS marker on a Mac.
+///
+/// Unlike macOS there is no universal binary and no Rosetta: an asset marked
+/// for the other CPU is never usable, so it is rejected outright, and an
+/// unmarked asset ranks below one that names the native architecture.
+fn find_linux_asset_for_arch(
+    assets: &[ReleaseAsset],
+    target_arch: CpuArch,
+) -> Option<&ReleaseAsset> {
+    log::debug!("Finding Linux asset from {} candidates", assets.len());
+    let extensions = [".deb", ".appimage", ".tar.gz", ".zip"];
+    // "linux32" is deliberately not a valid marker: it names a 32-bit x86
+    // build, which no supported target can run — it is rejected through
+    // UNSUPPORTED_CPU_MARKERS instead.
+    let linux_markers = ["linux", "linux64", "ubuntu", "debian"];
+    let other_os_markers = [
+        "windows", "win", "win32", "win64", "mac", "macos", "macosx", "darwin", "osx", "android",
+        "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
+    ];
+    // The first index that is a generic archive rather than a Linux-specific
+    // package format, mirroring the macOS picker's `package_rank >= 3` check.
+    const FIRST_GENERIC_ARCHIVE_RANK: usize = 2;
+
+    let selected = assets
+        .iter()
+        .filter_map(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
+
+            if other_os_markers
+                .iter()
+                .any(|marker| has_name_marker(&name, marker))
+            {
+                return None;
+            }
+
+            let has_linux_marker = linux_markers
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
+            let generic_archive = package_rank >= FIRST_GENERIC_ARCHIVE_RANK;
+            if generic_archive && !has_linux_marker {
+                return None;
+            }
+
+            let arm64 = ["arm64", "aarch64"]
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
+            // "intel" is left out on purpose: unlike macOS naming, Linux asset
+            // names rarely use it for the CPU (an "intel" variant is more
+            // often about GPUs or MKL builds). "linux64" counts: by the same
+            // convention that makes linux32 mean 32-bit x86, it means x86_64 —
+            // and the boundary check keeps the bare "x64" marker from matching
+            // inside it, so it needs its own entry.
+            let x86_64 = ["x86_64", "x86-64", "amd64", "x64", "linux64"]
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
+            let unsupported_cpu = UNSUPPORTED_CPU_MARKERS
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
+
+            let foreign_arch = match target_arch {
+                CpuArch::Arm64 => x86_64 && !arm64,
+                CpuArch::X86_64 => arm64 && !x86_64,
+            };
+            if unsupported_cpu || foreign_arch {
+                return None;
+            }
+
+            let native_arch = match target_arch {
+                CpuArch::Arm64 => arm64,
+                CpuArch::X86_64 => x86_64,
+            };
+            let architecture_rank = if native_arch { 0 } else { 1 };
+
+            Some((asset, (architecture_rank, package_rank)))
+        })
+        .min_by(|(asset_a, rank_a), (asset_b, rank_b)| {
+            rank_a
+                .cmp(rank_b)
+                .then_with(|| asset_a.name.cmp(&asset_b.name))
+        });
+
+    match selected {
+        Some((asset, _)) => {
+            log::debug!("Selected compatible Linux asset: {}", asset.name);
             Some(asset)
         }
         None => {
@@ -747,6 +910,16 @@ mod tests {
             name: name.to_string(),
             browser_download_url: "url".to_string(),
             size: 100,
+        }
+    }
+
+    /// An asset name the picker accepts on the platform these tests run on,
+    /// whatever the CPU: universal on macOS, architecture-unmarked on Linux.
+    fn compatible_asset_name(stem: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("{stem}-macos-universal.dmg")
+        } else {
+            format!("{stem}.AppImage")
         }
     }
 
@@ -1146,7 +1319,8 @@ mod tests {
     fn test_forge_release_shape_is_shared_by_both_forges() {
         // Field-for-field, a Forgejo release payload deserializes like a GitHub
         // one — the reason a single adapter-agnostic type is enough. Extra
-        // Forgejo-only fields are ignored.
+        // Forgejo-only fields are ignored. Assets for both platforms, so the
+        // pick works wherever this test runs.
         let payload = r#"{
             "tag_name": "v2.1.0",
             "body": "notes",
@@ -1160,6 +1334,13 @@ mod tests {
                     "size": 4096,
                     "uuid": "8e0f",
                     "browser_download_url": "https://git.example.internal/owner/repo/releases/download/v2.1.0/App-macos-universal.dmg"
+                },
+                {
+                    "id": 8,
+                    "name": "App.AppImage",
+                    "size": 4096,
+                    "uuid": "8e10",
+                    "browser_download_url": "https://git.example.internal/owner/repo/releases/download/v2.1.0/App.AppImage"
                 }
             ]
         }"#;
@@ -1167,7 +1348,7 @@ mod tests {
         let release: ForgeRelease = serde_json::from_str(payload).unwrap();
         let release = release.build_release().unwrap();
         assert_eq!(release.version, "2.1.0");
-        assert_eq!(release.file_name, "App-macos-universal.dmg");
+        assert_eq!(release.file_name, compatible_asset_name("App"));
         assert_eq!(release.file_size, Some(4096));
         assert_eq!(release.release_notes.as_deref(), Some("notes"));
         assert!(release
@@ -1275,7 +1456,7 @@ mod tests {
     async fn test_forgejo_reads_the_latest_release_with_credentials() {
         let (address, requests) = mock_forge(vec![(
             200,
-            forgejo_release_json("v1.4.0", false, "App-macos-universal.dmg"),
+            forgejo_release_json("v1.4.0", false, &compatible_asset_name("App")),
         )])
         .await;
 
@@ -1289,7 +1470,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(release.version, "1.4.0");
-        assert_eq!(release.file_name, "App-macos-universal.dmg");
+        assert_eq!(release.file_name, compatible_asset_name("App"));
         assert_eq!(release.file_size, Some(1024));
 
         let requests = requests.lock().unwrap();
@@ -1312,12 +1493,12 @@ mod tests {
             (404, "{}".to_string()),
             (
                 200,
-                // Universal assets so the fixture picks the same release on
-                // either Mac architecture.
+                // Architecture-neutral assets so the fixture picks the same
+                // release whatever CPU the tests run on.
                 format!(
                     "[{}, {}]",
-                    forgejo_release_json("v2.0.0-rc.1", true, "Draft-macos-universal.dmg"),
-                    forgejo_release_json("v1.9.0", false, "App-macos-universal.dmg")
+                    forgejo_release_json("v2.0.0-rc.1", true, &compatible_asset_name("Draft")),
+                    forgejo_release_json("v1.9.0", false, &compatible_asset_name("App"))
                 ),
             ),
         ])
@@ -1396,7 +1577,7 @@ mod tests {
         // "checksums-dmg" must not be mistaken for a .dmg file
         let assets = vec![asset("checksums-dmg"), asset("MyApp-macos.zip")];
 
-        let selected = find_macos_asset(&assets).unwrap();
+        let selected = find_macos_asset_for_arch(&assets, target_cpu_arch()).unwrap();
         assert_eq!(selected.name, "MyApp-macos.zip");
     }
 
@@ -1411,7 +1592,7 @@ mod tests {
             asset("ferrite-windows-x64.zip"),
         ];
 
-        let selected = find_macos_asset(&assets).unwrap();
+        let selected = find_macos_asset_for_arch(&assets, target_cpu_arch()).unwrap();
         // Definitely a macOS tar.gz, never the windows zip
         assert!(selected.name.contains("macos"));
         assert!(selected.name.ends_with("tar.gz"));
@@ -1424,7 +1605,7 @@ mod tests {
             asset("tool-universal.dmg"),
             asset("tool-arm64.dmg"),
         ];
-        for target_arch in [MacArch::AppleSilicon, MacArch::X86_64] {
+        for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
             let selected = find_macos_asset_for_arch(&assets, target_arch).unwrap();
             assert_eq!(selected.name, "tool-universal.dmg");
         }
@@ -1437,8 +1618,8 @@ mod tests {
             asset("tool-macos-arm64.dmg"),
         ];
         for (target_arch, expected) in [
-            (MacArch::AppleSilicon, "tool-macos-arm64.dmg"),
-            (MacArch::X86_64, "tool-macos-x86_64.dmg"),
+            (CpuArch::Arm64, "tool-macos-arm64.dmg"),
+            (CpuArch::X86_64, "tool-macos-x86_64.dmg"),
         ] {
             let selected = find_macos_asset_for_arch(&assets, target_arch).unwrap();
             assert_eq!(selected.name, expected);
@@ -1447,18 +1628,21 @@ mod tests {
 
     #[test]
     fn test_asset_selection_wrapper_dispatches_to_build_target() {
+        // Assets for both platforms and both CPUs, so the wrapper has a valid
+        // pick wherever this test runs.
         let assets = vec![
             asset("tool-macos-x86_64.dmg"),
             asset("tool-macos-arm64.dmg"),
+            asset("tool-linux-x86_64.deb"),
+            asset("tool-linux-arm64.deb"),
         ];
-        let target_arch = if cfg!(target_arch = "aarch64") {
-            MacArch::AppleSilicon
-        } else {
-            MacArch::X86_64
-        };
 
-        let selected = find_macos_asset(&assets).unwrap();
-        let expected = find_macos_asset_for_arch(&assets, target_arch).unwrap();
+        let expected = if cfg!(target_os = "macos") {
+            find_macos_asset_for_arch(&assets, target_cpu_arch()).unwrap()
+        } else {
+            find_linux_asset_for_arch(&assets, target_cpu_arch()).unwrap()
+        };
+        let selected = find_compatible_asset(&assets).unwrap();
         assert_eq!(selected.name, expected.name);
     }
 
@@ -1466,7 +1650,7 @@ mod tests {
     fn test_dmg_fallback_without_keywords() {
         // dmg is macOS-specific, so it may match without a keyword
         let assets = vec![asset("MyTool-1.2.3.dmg")];
-        let selected = find_macos_asset(&assets).unwrap();
+        let selected = find_macos_asset_for_arch(&assets, target_cpu_arch()).unwrap();
         assert_eq!(selected.name, "MyTool-1.2.3.dmg");
     }
 
@@ -1478,21 +1662,21 @@ mod tests {
             asset("tool-arm64.zip"),
             asset("tool-x86_64.tar.gz"),
         ];
-        for target_arch in [MacArch::AppleSilicon, MacArch::X86_64] {
+        for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
             assert!(find_macos_asset_for_arch(&assets, target_arch).is_none());
         }
     }
 
     #[test]
     fn test_architecture_compatibility_precedes_package_preference() {
-        let cases: &[(MacArch, &[&str], &str)] = &[
+        let cases: &[(CpuArch, &[&str], &str)] = &[
             (
-                MacArch::AppleSilicon,
+                CpuArch::Arm64,
                 &["tool-macos-x86_64.dmg", "tool-macos-arm64.zip"],
                 "tool-macos-arm64.zip",
             ),
             (
-                MacArch::X86_64,
+                CpuArch::X86_64,
                 &["tool-macos-arm64.dmg", "tool-macos-x86_64.zip"],
                 "tool-macos-x86_64.zip",
             ),
@@ -1512,21 +1696,21 @@ mod tests {
             ["tool-macos-x86_64-alpha.dmg", "tool-macos-x86_64-zeta.dmg"],
         ] {
             let assets: Vec<_> = names.iter().map(|name| asset(name)).collect();
-            let selected = find_macos_asset_for_arch(&assets, MacArch::X86_64).unwrap();
+            let selected = find_macos_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
             assert_eq!(selected.name, "tool-macos-x86_64-alpha.dmg");
         }
     }
 
     #[test]
     fn test_explicit_non_macos_markers_are_rejected() {
-        let cases: &[(MacArch, &[&str], &str)] = &[
+        let cases: &[(CpuArch, &[&str], &str)] = &[
             (
-                MacArch::AppleSilicon,
+                CpuArch::Arm64,
                 &["tool-linux-arm64.dmg", "tool-macos-arm64.zip"],
                 "tool-macos-arm64.zip",
             ),
             (
-                MacArch::X86_64,
+                CpuArch::X86_64,
                 &["tool-windows-x86_64.pkg", "tool-macos-x86_64.zip"],
                 "tool-macos-x86_64.zip",
             ),
@@ -1546,29 +1730,247 @@ mod tests {
             asset("tool-macos-x86_64.dmg"),
         ];
         assert_eq!(
-            find_macos_asset_for_arch(&assets, MacArch::AppleSilicon)
+            find_macos_asset_for_arch(&assets, CpuArch::Arm64)
                 .unwrap()
                 .name,
             "tool-macos-x86_64.dmg"
         );
 
         let assets = vec![asset("tool-macos-arm64.dmg")];
-        assert!(find_macos_asset_for_arch(&assets, MacArch::X86_64).is_none());
+        assert!(find_macos_asset_for_arch(&assets, CpuArch::X86_64).is_none());
     }
 
     #[test]
     fn test_unsupported_cpu_assets_are_rejected() {
         for (target_arch, name) in [
-            (MacArch::AppleSilicon, "tool-macos-armv7.dmg"),
-            (MacArch::AppleSilicon, "tool-macos-x86_32.dmg"),
-            (MacArch::AppleSilicon, "tool-macos-i786.dmg"),
-            (MacArch::X86_64, "tool-macos-arm64.dmg"),
-            (MacArch::X86_64, "tool-macos-x86_32.dmg"),
-            (MacArch::X86_64, "tool-macos-i786.dmg"),
+            (CpuArch::Arm64, "tool-macos-armv7.dmg"),
+            (CpuArch::Arm64, "tool-macos-x86_32.dmg"),
+            (CpuArch::Arm64, "tool-macos-i786.dmg"),
+            (CpuArch::X86_64, "tool-macos-arm64.dmg"),
+            (CpuArch::X86_64, "tool-macos-x86_32.dmg"),
+            (CpuArch::X86_64, "tool-macos-i786.dmg"),
         ] {
             let assets = vec![asset(name)];
             assert!(find_macos_asset_for_arch(&assets, target_arch).is_none());
         }
+    }
+
+    #[test]
+    fn test_linux_prefers_deb_then_appimage_then_marked_archives() {
+        let assets = vec![
+            asset("tool-linux-x86_64.tar.gz"),
+            asset("tool-x86_64.AppImage"),
+            asset("tool-linux-amd64.deb"),
+            asset("tool-windows-x64.zip"),
+            asset("tool-macos-universal.dmg"),
+        ];
+
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux-amd64.deb");
+
+        let without_deb = vec![
+            asset("tool-linux-x86_64.tar.gz"),
+            asset("tool-x86_64.AppImage"),
+            asset("tool-windows-x64.zip"),
+        ];
+        let selected = find_linux_asset_for_arch(&without_deb, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-x86_64.AppImage");
+    }
+
+    #[test]
+    fn test_linux_generic_archives_require_linux_marker() {
+        // deb and AppImage are Linux-specific, so they match without a keyword;
+        // a bare archive could be anything, source code included.
+        let assets = vec![asset("tool-x86_64.tar.gz"), asset("tool-x86_64.zip")];
+        assert!(find_linux_asset_for_arch(&assets, CpuArch::X86_64).is_none());
+
+        let assets = vec![asset("tool-linux-x86_64.tar.gz")];
+        assert_eq!(
+            find_linux_asset_for_arch(&assets, CpuArch::X86_64)
+                .unwrap()
+                .name,
+            "tool-linux-x86_64.tar.gz"
+        );
+
+        let assets = vec![asset("tool.deb"), asset("tool.AppImage")];
+        assert_eq!(
+            find_linux_asset_for_arch(&assets, CpuArch::X86_64)
+                .unwrap()
+                .name,
+            "tool.deb"
+        );
+    }
+
+    #[test]
+    fn test_linux_native_arch_preferred_and_foreign_arch_rejected() {
+        let assets = vec![asset("tool-linux-amd64.deb"), asset("tool-linux-arm64.deb")];
+        for (target_arch, expected) in [
+            (CpuArch::Arm64, "tool-linux-arm64.deb"),
+            (CpuArch::X86_64, "tool-linux-amd64.deb"),
+        ] {
+            let selected = find_linux_asset_for_arch(&assets, target_arch).unwrap();
+            assert_eq!(selected.name, expected);
+        }
+
+        // There is no Rosetta on Linux: an asset for the other CPU is never
+        // usable, on either target.
+        let assets = vec![asset("tool-linux-arm64.deb")];
+        assert!(find_linux_asset_for_arch(&assets, CpuArch::X86_64).is_none());
+        let assets = vec![asset("tool-linux-x86_64.AppImage")];
+        assert!(find_linux_asset_for_arch(&assets, CpuArch::Arm64).is_none());
+    }
+
+    #[test]
+    fn test_linux_unmarked_arch_ranks_below_native() {
+        let assets = vec![asset("tool-linux.deb"), asset("tool-linux-amd64.deb")];
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux-amd64.deb");
+
+        // An unmarked asset is still acceptable when nothing names the CPU.
+        let assets = vec![asset("tool-linux.deb")];
+        assert!(find_linux_asset_for_arch(&assets, CpuArch::Arm64).is_some());
+    }
+
+    #[test]
+    fn test_linux_architecture_compatibility_precedes_package_preference() {
+        // A native-arch archive beats a foreign-format .deb-less pick: the
+        // (architecture, package) rank order matches the macOS picker.
+        let assets = vec![
+            asset("tool-linux-arm64.AppImage"),
+            asset("tool-linux-x86_64.tar.gz"),
+        ];
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux-x86_64.tar.gz");
+    }
+
+    #[test]
+    fn test_linux_rejects_other_platforms_and_unsupported_cpus() {
+        for name in [
+            "tool-macos-universal.dmg",
+            "tool-macos-arm64.zip",
+            "tool-windows-x64.zip",
+            "tool-linux-x86_64.rpm",
+            "tool-linux-armv7.deb",
+            "tool-linux-i386.deb",
+            "tool-linux-riscv64.AppImage",
+            // 32-bit x86 by convention, so never runnable on a supported
+            // target — and it must not pass as a mere "Linux" marker either.
+            "tool-linux32.tar.gz",
+            "tool-linux32.AppImage",
+            // Debian architecture names: the marker boundary check means the
+            // short forms don't match inside them, so each needs its own entry
+            // in UNSUPPORTED_CPU_MARKERS.
+            "tool_1.0_ppc64el.deb",
+            "tool_1.0_armel.deb",
+            "tool_1.0_s390x.deb",
+            "tool_1.0_mips64el.deb",
+            "tool_1.0_loong64.deb",
+            "tool_1.0_sparc64.deb",
+        ] {
+            let assets = vec![asset(name)];
+            for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
+                assert!(
+                    find_linux_asset_for_arch(&assets, target_arch).is_none(),
+                    "should reject {name}"
+                );
+            }
+        }
+    }
+
+    /// Obtainintosh tracks itself, so its own release has to be readable by
+    /// every build it ships. These are the exact file names the release
+    /// workflow produces (Tauri's `<Product>_<version>_<arch>` naming for the
+    /// Linux bundles, tauri-action's for the macOS ones) — if a bundle target
+    /// or naming convention changes, the app stops seeing its own updates,
+    /// which is precisely the failure nobody notices until a release is out.
+    #[test]
+    fn test_obtainintoshs_own_release_assets_are_readable_on_every_shipped_build() {
+        let assets = vec![
+            asset("Obtainintosh_1.6.0_aarch64.dmg"),
+            asset("Obtainintosh_1.6.0_x64.dmg"),
+            asset("Obtainintosh_1.6.0_amd64.deb"),
+            asset("Obtainintosh_1.6.0_amd64.AppImage"),
+        ];
+
+        // The Linux builds are x86_64-only, and the .deb is preferred there.
+        assert_eq!(
+            find_linux_asset_for_arch(&assets, CpuArch::X86_64)
+                .unwrap()
+                .name,
+            "Obtainintosh_1.6.0_amd64.deb"
+        );
+        // Each Mac gets its own architecture's disk image, and never a Linux
+        // package — the extension gate keeps .deb/.AppImage out entirely.
+        assert_eq!(
+            find_macos_asset_for_arch(&assets, CpuArch::Arm64)
+                .unwrap()
+                .name,
+            "Obtainintosh_1.6.0_aarch64.dmg"
+        );
+        assert_eq!(
+            find_macos_asset_for_arch(&assets, CpuArch::X86_64)
+                .unwrap()
+                .name,
+            "Obtainintosh_1.6.0_x64.dmg"
+        );
+    }
+
+    #[test]
+    fn test_linux32_is_never_chosen_over_a_64_bit_build() {
+        // The legacy naming pair: both carry a Linux marker and neither spells
+        // out a CPU the short markers match, so without linux32/linux64 being
+        // classified the name tiebreak would hand over the 32-bit build.
+        let assets = vec![asset("tool-linux32.zip"), asset("tool-linux64.zip")];
+
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux64.zip");
+
+        // linux64 names x86_64, so it is not for an arm64 machine at all.
+        assert!(find_linux_asset_for_arch(&assets, CpuArch::Arm64).is_none());
+    }
+
+    #[test]
+    fn test_linux64_counts_as_the_native_architecture() {
+        // Ranked as native (0), so it beats an architecture-unmarked build
+        // even though that one's package format would otherwise tie.
+        let assets = vec![asset("tool-linux.tar.gz"), asset("tool-linux64.tar.gz")];
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux64.tar.gz");
+    }
+
+    #[test]
+    fn test_unsupported_cpu_markers_are_shared_by_both_pickers() {
+        // The list exists once so an architecture learned on one platform
+        // cannot stay accepted on the other.
+        for marker in ["ppc64el", "s390x", "armel", "loong64"] {
+            let macos_asset = vec![asset(&format!("tool-macos-{marker}.dmg"))];
+            let linux_asset = vec![asset(&format!("tool-linux-{marker}.deb"))];
+            for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
+                assert!(
+                    find_macos_asset_for_arch(&macos_asset, target_arch).is_none(),
+                    "macOS picker should reject {marker}"
+                );
+                assert!(
+                    find_linux_asset_for_arch(&linux_asset, target_arch).is_none(),
+                    "Linux picker should reject {marker}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_x86_64_assets_survive_the_unsupported_cpu_list() {
+        // A bare "x86" marker would also match inside "x86_64"/"x86-64" and
+        // reject every 64-bit Intel asset, so it is deliberately absent.
+        for name in ["tool-linux-x86_64.deb", "tool-linux-x86-64.AppImage"] {
+            let assets = vec![asset(name)];
+            assert!(
+                find_linux_asset_for_arch(&assets, CpuArch::X86_64).is_some(),
+                "should accept {name}"
+            );
+        }
+        let assets = vec![asset("tool-macos-x86_64.dmg")];
+        assert!(find_macos_asset_for_arch(&assets, CpuArch::X86_64).is_some());
     }
 
     fn parse_release(json: &str) -> ForgeRelease {
@@ -1580,11 +1982,14 @@ mod tests {
     }
 
     #[test]
-    fn latest_without_macos_asset_falls_back_to_an_older_stable_release() {
+    fn latest_without_compatible_asset_falls_back_to_an_older_stable_release() {
         let latest = parse_release(include_str!(
-            "../test-data/github/latest-missing-mac-asset.json"
+            "../test-data/github/latest-missing-compatible-asset.json"
         ));
-        assert!(!latest.has_macos_asset(), "fixture should lack a Mac asset");
+        assert!(
+            !latest.has_compatible_asset(),
+            "fixture should lack a compatible asset"
+        );
 
         let releases = parse_releases(include_str!("../test-data/github/older-stable-valid.json"));
         let selected = select_recent_release(&releases, true).unwrap();
@@ -1628,9 +2033,9 @@ mod tests {
             .to_string();
 
         assert!(
-            error.contains(
-                "No macOS-compatible stable release found in the 10 most recent releases"
-            ),
+            error.contains(&format!(
+                "No {PLATFORM_LABEL}-compatible stable release found in the 10 most recent releases"
+            )),
             "{error}"
         );
         // The prerelease is there and installable — it is withheld on purpose,

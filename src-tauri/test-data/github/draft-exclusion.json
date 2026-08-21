@@ -9,6 +9,11 @@
         "name": "tool-macos-universal.dmg",
         "browser_download_url": "https://example.invalid/tool-v3.0.0.dmg",
         "size": 300
+      },
+      {
+        "name": "tool.AppImage",
+        "browser_download_url": "https://example.invalid/tool-v3.0.0.AppImage",
+        "size": 300
       }
     ]
   },
@@ -21,6 +26,11 @@
       {
         "name": "tool-macos-universal.dmg",
         "browser_download_url": "https://example.invalid/tool-v2.9.0.dmg",
+        "size": 290
+      },
+      {
+        "name": "tool.AppImage",
+        "browser_download_url": "https://example.invalid/tool-v2.9.0.AppImage",
         "size": 290
       }
     ]

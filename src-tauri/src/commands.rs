@@ -27,6 +27,20 @@ const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// connection per app at once, or trip a forge's rate limiting.
 const RELEASE_CHECK_CONCURRENCY: usize = 4;
 
+/// What the platform's file browser is called in user-facing messages.
+#[cfg(target_os = "macos")]
+const FILE_MANAGER_NAME: &str = "Finder";
+#[cfg(not(target_os = "macos"))]
+const FILE_MANAGER_NAME: &str = "the file manager";
+
+#[cfg(target_os = "macos")]
+const REVEAL_SUCCESS_MESSAGE: &str =
+    "The file was revealed in Finder. Please double-click it to install.";
+#[cfg(not(target_os = "macos"))]
+const REVEAL_SUCCESS_MESSAGE: &str = "The file was revealed in the file manager. \
+     Please install it from there (a .deb opens in the package installer; an \
+     AppImage needs to be marked executable).";
+
 /// Holds the single global download slot for as long as it is alive, so a
 /// second download — for any app — is refused rather than racing the first.
 /// Released on drop, which covers the error and early-return paths too.
@@ -192,13 +206,10 @@ pub async fn add_app(
     let source_type = resolve_source_type(source_type, &url)?;
     let credentials = credentials_for(source_type, username, access_token);
 
-    // Check if app is already installed
-    let (current_version, install_path) =
-        if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
-            (Some(version), Some(path))
-        } else {
-            (None, None)
-        };
+    // Check if app is already installed. Off the async runtime like every
+    // other detection call: it reads directories and, on Linux, shells out to
+    // dpkg-query, which would block a worker thread here.
+    let (current_version, install_path) = detect_installed_app_off_runtime(name.clone()).await?;
 
     let app = App {
         id: String::new(),
@@ -292,9 +303,10 @@ pub async fn check_for_updates(
     let total = apps.len();
 
     // Re-detect installed versions for every app in one pass, off the async
-    // runtime. This walks /Applications, which is blocking filesystem work: on
-    // the runtime it stalls the executor, and once per app it re-reads the
-    // same directories N times.
+    // runtime. This walks the platform's application inventory (application
+    // directories on macOS, the package database and AppImage directories on
+    // Linux), which is blocking work: on the runtime it stalls the executor,
+    // and once per app it re-reads the same sources N times.
     let detected = detect_apps_for_check(apps.clone(), is_batch).await?;
     let names: Arc<Vec<String>> = Arc::new(apps.iter().map(|app| app.name.clone()).collect());
     // The records as they were before the check ran. apply_check_result
@@ -582,21 +594,22 @@ pub async fn download_and_install(
 
     log::info!("Downloaded to {}", download_path.display());
 
-    // Instead of trying to install automatically (which requires special entitlements),
-    // just reveal the file in Finder so the user can install it manually
-    log::info!("Revealing file in Finder...");
+    // Instead of trying to install automatically (which requires special
+    // privileges), just reveal the file in the platform's file browser so the
+    // user can install it manually
+    log::info!("Revealing downloaded file...");
     // The message has to reflect what actually happened: telling the user to
-    // look in Finder when the reveal failed sends them hunting for a window
-    // that was never opened.
-    let reveal_message = match reveal_in_finder(&download_path) {
+    // look in the file browser when the reveal failed sends them hunting for
+    // a window that was never opened.
+    let reveal_message = match reveal_download(&download_path).await {
         Ok(()) => {
-            log::info!("File revealed in Finder successfully");
-            "The file was revealed in Finder. Please double-click it to install.".to_string()
+            log::info!("File revealed successfully");
+            REVEAL_SUCCESS_MESSAGE.to_string()
         }
         Err(error) => {
-            log::warn!("Failed to reveal in Finder: {error}");
+            log::warn!("Failed to reveal the download: {error}");
             format!(
-                "Finder could not reveal the file ({error}). Please open its containing folder manually."
+                "The file could not be revealed in {FILE_MANAGER_NAME} ({error}). Please open its containing folder manually."
             )
         }
     };
@@ -620,10 +633,25 @@ pub async fn download_and_install(
     ))
 }
 
+/// One program's installed version and location, detected off the async
+/// runtime. The batch equivalent is `detect_apps_for_check`.
+async fn detect_installed_app_off_runtime(
+    name: String,
+) -> Result<(Option<String>, Option<String>), String> {
+    tokio::task::spawn_blocking(
+        move || match crate::installer::detect_installed_app(&name) {
+            Some((path, version)) => (Some(version), Some(path)),
+            None => (None, None),
+        },
+    )
+    .await
+    .map_err(|error| format!("Installed-app detection failed: {error}"))
+}
+
 /// Re-detects the installed version of every app in one blocking pass.
 ///
-/// `use_shared_index` builds the directory listing once for the whole batch;
-/// a single-app check skips it and does the direct lookup instead.
+/// `use_shared_index` builds the platform's install index once for the whole
+/// batch; a single-app check skips it and does the direct lookup instead.
 async fn detect_apps_for_check(
     apps: Vec<App>,
     use_shared_index: bool,
@@ -639,8 +667,8 @@ async fn detect_apps_for_check(
                 match installed {
                     Some((path, version)) => (Some(version), Some(path)),
                     // Obtainintosh itself is running right now, so it always
-                    // has a current version — even without an /Applications
-                    // install. Prefer the bundle the process runs from (stays
+                    // has a current version — even without a system install.
+                    // Prefer the bundle the process runs from (stays
                     // accurate if that bundle is replaced on disk by an
                     // update); the compiled-in version is the fallback for dev
                     // builds outside a bundle.
@@ -827,9 +855,22 @@ fn validate_download_size(actual: u64, expected: u64) -> Result<()> {
     Ok(())
 }
 
-/// Reveals a file in Finder, reporting whether it actually worked. The caller
-/// tells the user what happened, so a failure here must not be swallowed.
-fn reveal_in_finder(path: &Path) -> Result<()> {
+/// Reveals a file in the platform's file browser, reporting whether it
+/// actually worked. The caller tells the user what happened, so a failure here
+/// must not be swallowed.
+///
+/// Runs on a blocking thread: the macOS side shells out and the Linux side
+/// makes a blocking D-Bus call, neither of which belongs on the async runtime
+/// (zbus's blocking API in particular must never run inside one).
+async fn reveal_download(path: &Path) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || reveal_download_blocking(&path))
+        .await
+        .context("the reveal task failed")?
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_download_blocking(path: &Path) -> Result<()> {
     let output = std::process::Command::new("open")
         .arg("-R")
         .arg(path)
@@ -846,6 +887,15 @@ fn reveal_in_finder(path: &Path) -> Result<()> {
         anyhow::bail!("the macOS 'open' command exited with {}", output.status);
     }
     anyhow::bail!("the macOS 'open' command failed: {detail}")
+}
+
+/// The opener plugin asks the desktop's org.freedesktop.FileManager1 service
+/// to select the file, falling back to opening its directory through the
+/// portal — the two ways "reveal" exists across Linux desktops.
+#[cfg(not(target_os = "macos"))]
+fn reveal_download_blocking(path: &Path) -> Result<()> {
+    tauri_plugin_opener::reveal_item_in_dir(path)
+        .map_err(|error| anyhow::anyhow!("the file manager could not show it: {error}"))
 }
 
 /// Credentials stored on a tracked app, for the forges that need them.

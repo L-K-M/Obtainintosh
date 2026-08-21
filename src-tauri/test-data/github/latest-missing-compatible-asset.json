@@ -5,8 +5,8 @@
   "prerelease": false,
   "assets": [
     {
-      "name": "tool-linux-x86_64.tar.gz",
-      "browser_download_url": "https://example.invalid/tool-linux-x86_64.tar.gz",
+      "name": "tool-windows-x64.zip",
+      "browser_download_url": "https://example.invalid/tool-windows-x64.zip",
       "size": 200
     }
   ]
