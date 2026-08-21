@@ -7,7 +7,7 @@ Obtainintosh currently supports GitHub repositories and Forgejo instances, inclu
 > [!IMPORTANT]
 > Obtainintosh does not install or replace applications. It downloads and reveals release files; you must inspect and install them yourself.
 
-**Latest release:** v<!-- version -->1.5.0<!-- /version --> | [Download from GitHub Releases](https://github.com/L-K-M/Obtainintosh/releases/latest)
+**Latest release:** v<!-- version -->1.6.0<!-- /version --> | [Download from GitHub Releases](https://github.com/L-K-M/Obtainintosh/releases/latest)
 
 ![Main window screenshot showing a list of programs in different states](./screenshot.png)
 
