@@ -1,6 +1,6 @@
 # Obtainintosh
 
-Obtainintosh is a macOS desktop app for tracking applications distributed through GitHub or Forgejo releases. It compares releases with applications found in `/Applications` or `~/Applications`, downloads a suitable macOS release asset, and reveals the downloaded file in Finder.
+Obtainintosh is a desktop app for macOS and Linux that tracks applications distributed through GitHub or Forgejo releases. It compares releases with what is installed — `.app` bundles in `/Applications` or `~/Applications` on macOS; dpkg packages and AppImages on Linux — downloads a release asset suitable for the platform it runs on, and reveals the downloaded file in the file manager.
 
 Obtainintosh currently supports GitHub repositories and Forgejo instances, including private instances that require a username and an application key. GitLab and arbitrary download pages are not supported.
 
@@ -18,27 +18,35 @@ Obtainintosh currently supports GitHub repositories and Forgejo instances, inclu
 
 The release workflow builds Obtainintosh for:
 
-- Apple Silicon (`aarch64-apple-darwin`)
-- Intel (`x86_64-apple-darwin`)
+- macOS on Apple Silicon (`aarch64-apple-darwin`), as a `.dmg`
+- macOS on Intel (`x86_64-apple-darwin`), as a `.dmg`
+- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb` and an `.AppImage`
 
-No minimum macOS version is currently documented. Obtainintosh is not released for Windows or Linux.
+No minimum macOS version is currently documented. The Linux packages are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. Obtainintosh is not released for Windows.
 
-Release builds can be produced without Apple signing credentials. The workflow enables signing and notarization only when the required secrets are configured, so this repository does not guarantee that a given release asset is signed or notarized. Check the release details and verify that downloads came from this repository before bypassing any macOS security warning.
+Release builds can be produced without Apple signing credentials. The workflow enables signing and notarization only when the required secrets are configured, so this repository does not guarantee that a given release asset is signed or notarized. Check the release details and verify that downloads came from this repository before bypassing any macOS security warning. The Linux packages are not signed.
 
 ## Install a release
+
+On macOS:
 
 1. Open the [latest GitHub Release](https://github.com/L-K-M/Obtainintosh/releases/latest).
 2. Download the `.dmg` for your Mac's architecture: Apple Silicon or Intel.
 3. Open the disk image and copy Obtainintosh to your Applications folder.
 
+On Ubuntu (and other Debian-family distributions):
+
+1. Open the [latest GitHub Release](https://github.com/L-K-M/Obtainintosh/releases/latest).
+2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
+
 ## Use Obtainintosh
 
 1. Choose **Add Program** and enter a repository URL such as `https://github.com/owner/project` or `https://codeberg.org/owner/project`.
-2. Enter the application's bundle name as it appears in `/Applications` or `~/Applications` so Obtainintosh can detect its installed version.
+2. Enter the application's name so Obtainintosh can detect its installed version: on macOS, the bundle name as it appears in `/Applications` or `~/Applications`; on Linux, the name of its dpkg package (case and spaces don't matter — "My App" finds `my-app`) or of an AppImage in `~/Applications` or `~/.local/bin`.
 3. Leave **Source** on *Detect automatically* for a `github.com` repository, and choose *Forgejo* for an instance whose address does not identify the software. See [Forgejo instances](#forgejo-instances).
 4. Check for updates. Obtainintosh also checks tracked applications when it starts.
-5. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in Finder.
-6. Open the downloaded `.dmg`, `.pkg`, or archive and complete installation manually.
+5. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS).
+6. Open the downloaded file (`.dmg`, `.pkg`, `.deb`, archive, …) and complete installation manually. An `.AppImage` just needs to be marked executable and moved wherever you keep AppImages.
 
 Obtainintosh reads the latest published release. If a repository has no normal latest release, it can fall back to the newest non-draft release, including a prerelease.
 
@@ -64,7 +72,9 @@ A username and key are sent as HTTP Basic credentials, which Forgejo accepts bot
 
 ## Supported release assets
 
-Repositories must publish a macOS asset on their releases. Obtainintosh looks for these formats in priority order:
+Repositories must publish an asset for the platform Obtainintosh runs on. Asset selection depends on filenames; Obtainintosh does not inspect archive contents or verify checksums.
+
+On macOS, it looks for these formats in priority order:
 
 1. `.dmg`
 2. `.pkg`
@@ -72,25 +82,41 @@ Repositories must publish a macOS asset on their releases. Obtainintosh looks fo
 4. `.tar.gz`
 5. `.zip`
 
-For generic archives such as `.tar.gz` and `.zip`, the filename must identify macOS or a supported architecture with a term such as `mac`, `macos`, `darwin`, `osx`, `universal`, `arm64`, `aarch64`, or `x86_64`. Universal assets are preferred, followed by assets matching the Mac's native architecture. Asset selection depends on filenames; Obtainintosh does not inspect archive contents or verify checksums.
+For generic archives such as `.tar.gz` and `.zip`, the filename must identify macOS or a supported architecture with a term such as `mac`, `macos`, `darwin`, `osx`, `universal`, `arm64`, `aarch64`, or `x86_64`. Universal assets are preferred, followed by assets matching the Mac's native architecture.
+
+On Linux, the priority order is:
+
+1. `.deb`
+2. `.AppImage`
+3. `.tar.gz`
+4. `.zip`
+
+For generic archives, the filename must identify Linux with a term such as `linux`, `ubuntu`, or `debian`. Assets naming the machine's architecture (`amd64`, `x86_64`, `arm64`, `aarch64`) are preferred over unmarked ones, and assets naming a different architecture are skipped — there is no Rosetta on Linux. `.rpm` assets are not used.
 
 ## GitHub token and rate limits
 
 Public repositories work without a token, but unauthenticated GitHub API requests have a lower rate limit. If checks are being rate-limited, add an optional GitHub personal access token under **Settings**. A fine-grained token with read-only access to public repositories is sufficient for public release checks. GitHub determines the applicable limits and reset time.
 
 > [!WARNING]
-> The token is currently stored in plaintext in `~/Library/Application Support/Obtainintosh/apps.json` alongside tracked applications and settings. Forgejo application keys are stored the same way, next to the program they belong to. Use narrowly scoped credentials and protect that file. Obtainintosh does not currently store tokens in macOS Keychain.
+> The token is currently stored in plaintext in `apps.json` (see [Data locations](#data-locations)) alongside tracked applications and settings. Forgejo application keys are stored the same way, next to the program they belong to. Use narrowly scoped credentials and protect that file. Obtainintosh does not currently store tokens in the macOS Keychain or a Linux keyring.
 
 ## Data locations
 
-- Tracked applications, settings, tokens, and Forgejo application keys: `~/Library/Application Support/Obtainintosh/apps.json`
-- Downloads: the macOS temporary directory under `obtainintosh-downloads`
+- Tracked applications, settings, tokens, and Forgejo application keys: `~/Library/Application Support/Obtainintosh/apps.json` on macOS; `$XDG_DATA_HOME/Obtainintosh/apps.json` (usually `~/.local/share/Obtainintosh/apps.json`) on Linux
+- Downloads: the system temporary directory under `obtainintosh-downloads`
 
-The download directory is temporary and may be cleared by macOS. Move files elsewhere if you need to keep them.
+The download directory is temporary and may be cleared by the operating system. Move files elsewhere if you need to keep them.
 
 ## Build from source
 
-Install Node.js 20, npm, the stable Rust toolchain, and the prerequisites for building Tauri applications on macOS. Then run:
+Install Node.js 20, npm, and the stable Rust toolchain. On Ubuntu, also install the Tauri v2 system prerequisites:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Then run:
 
 ```bash
 git clone https://github.com/L-K-M/Obtainintosh.git
@@ -99,21 +125,21 @@ npm ci
 npm run tauri dev
 ```
 
-To create a local application bundle and disk image:
+To create local bundles (a `.dmg` on macOS; a `.deb` and an `.AppImage` on Linux):
 
 ```bash
 npm run tauri build
 ```
 
-Bundles for the host architecture are written below `src-tauri/target/release/bundle/`. The release workflow cross-builds the separate Apple Silicon and Intel targets.
+Bundles for the host architecture are written below `src-tauri/target/release/bundle/`. The release workflow cross-builds the separate Apple Silicon and Intel targets and builds the Linux packages on Ubuntu 22.04.
 
 ## Troubleshooting
 
-### No macOS-compatible asset found
+### No macOS-compatible or Linux-compatible asset found
 
-- Confirm that the repository has a published release with a `.dmg`, `.pkg`, `.app.tar.gz`, `.tar.gz`, or `.zip` asset.
-- For `.tar.gz` and `.zip` files, confirm that the filename clearly identifies macOS or the architecture using one of the terms listed above.
-- Confirm that the release provides a universal asset or one matching your Mac's architecture.
+- Confirm that the repository has a published release with an asset in one of the formats listed under [Supported release assets](#supported-release-assets) for your platform.
+- For `.tar.gz` and `.zip` files, confirm that the filename clearly identifies the platform or the architecture using one of the terms listed above.
+- Confirm that the release provides an asset matching your machine's architecture (or, on macOS, a universal one).
 - If the project's naming does not match Obtainintosh's rules, download the correct asset directly from its release page.
 
 ### GitHub API rate limit or `403` error

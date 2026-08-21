@@ -1,13 +1,13 @@
 [
   {
     "tag_name": "v4.0.0-beta.2",
-    "body": "Latest prerelease without a Mac asset",
+    "body": "Latest prerelease without a compatible asset",
     "draft": false,
     "prerelease": true,
     "assets": [
       {
-        "name": "tool-linux-x86_64.tar.gz",
-        "browser_download_url": "https://example.invalid/tool-v4.0.0-beta.2.tar.gz",
+        "name": "tool-windows-x64.zip",
+        "browser_download_url": "https://example.invalid/tool-v4.0.0-beta.2.zip",
         "size": 402
       }
     ]
@@ -21,6 +21,11 @@
       {
         "name": "tool-macos-universal.dmg",
         "browser_download_url": "https://example.invalid/tool-v4.0.0-beta.1.dmg",
+        "size": 401
+      },
+      {
+        "name": "tool.AppImage",
+        "browser_download_url": "https://example.invalid/tool-v4.0.0-beta.1.AppImage",
         "size": 401
       }
     ]

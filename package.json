@@ -1,7 +1,7 @@
 {
   "name": "obtainintosh",
   "version": "1.5.0",
-  "description": "A macOS app for tracking and downloading app updates from GitHub and Forgejo releases.",
+  "description": "A desktop app for tracking and downloading app updates from GitHub and Forgejo releases.",
   "author": "Lukas Mathis",
   "type": "module",
   "scripts": {

@@ -6,16 +6,18 @@ releases are produced by pushing a version tag. Everything works with **no secre
 configured** — code signing and notarization are optional and only kick in when
 the relevant secrets are present.
 
-Obtainintosh is a **Mac OS X** application (an "Obtainium for OS X") and only
-bundles a `.dmg`, so its release matrix is macOS-only. Since the system accent
-color support, its Rust backend links against AppKit (`objc2-app-kit`), so CI
-lints and tests it on a macOS runner to exercise the real target.
+Obtainintosh started as a **Mac OS X** application (an "Obtainium for OS X") and
+now also ships for Linux, so the release matrix covers macOS (`.dmg`) and
+Ubuntu/Linux (`.deb` + `.AppImage`). Each platform has backend code the other
+never compiles — AppKit system colors and the `.app` scanner on macOS
+(`objc2-app-kit`), the dpkg/AppImage detection and D-Bus reveal on Linux — so
+CI lints and tests on both runners to exercise both real targets.
 
 ## Workflows
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | PRs + pushes to `main` | Type-check and build the SvelteKit frontend, then run `cargo fmt`/`clippy`/`test`. |
-| `.github/workflows/release.yml` | Pushing a `v*.*.*` tag, or manual dispatch with a `tag` input | Build the macOS Tauri `.dmg` bundles (Apple Silicon + Intel) and attach them to a GitHub Release. |
+| `.github/workflows/ci.yml` | PRs + pushes to `main` | Type-check and build the SvelteKit frontend, then run `cargo fmt`/`clippy`/`test` on macOS and Ubuntu. |
+| `.github/workflows/release.yml` | Pushing a `v*.*.*` tag, or manual dispatch with a `tag` input | Build the macOS Tauri `.dmg` bundles (Apple Silicon + Intel) and the Linux `.deb`/`.AppImage` bundles (x86_64), and attach them to a GitHub Release. |
 
 ## Continuous integration (`ci.yml`)
 
@@ -28,19 +30,21 @@ The CI workflow has two parallel jobs:
   (because `tauri::generate_context!` embeds it at compile time), then runs
   `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   and `cargo test --locked`. `Swatinem/rust-cache` caches the cargo build between
-  runs. This job
-  runs on macOS because the backend's system accent color support
-  (`#[cfg(target_os = "macos")]` + `objc2-app-kit`) only compiles there; the
-  macOS `.dmg` is built by the release workflow.
+  runs. The job is a matrix over `macos-latest` and `ubuntu-22.04`: each
+  platform's `#[cfg(target_os = ...)]` code (AppKit system colors on macOS,
+  dpkg/AppImage detection on Linux) only compiles on its own OS, so both real
+  targets are exercised. The bundles themselves are built by the release
+  workflow.
 
 Obtainintosh's `src-tauri` is a single crate (not a Cargo workspace), so the cargo
 commands run without `--workspace`. There is no `Cargo.toml` at the repository
 root — all cargo commands run from `src-tauri/` (the CI steps set
 `working-directory: src-tauri`).
 
-Since the Rust job runs on macOS, no Tauri Linux system packages are needed in
-CI. If a Linux job is ever added, Tauri v2 needs the `libwebkit2gtk-4.1-dev`
-package (the 4.1 series); Tauri v1 projects use `-4.0-dev` instead.
+The Ubuntu jobs install the Tauri v2 Linux system packages first —
+`libwebkit2gtk-4.1-dev` (the 4.1 series; Tauri v1 projects use `-4.0-dev`
+instead) plus the usual build tools; the release workflow additionally installs
+`patchelf` for the AppImage bundler.
 
 ### Running CI checks locally
 
@@ -107,27 +111,35 @@ The workflow:
 1. **Creates a draft GitHub Release** named `Obtainintosh v1.2.3` with
    auto-generated release notes. Tags containing `-` (e.g. `v1.2.3-rc.1`) are
    marked as pre-releases.
-2. **Builds the macOS desktop bundles** with `tauri-apps/tauri-action@v0` across a
-   two-way matrix and uploads each artifact to the draft release:
+2. **Builds the desktop bundles** with `tauri-apps/tauri-action@v0` across a
+   three-way matrix and uploads each artifact to the draft release:
    - macOS Apple Silicon (`aarch64-apple-darwin`) — `.dmg` / `.app`
    - macOS Intel (`x86_64-apple-darwin`) — `.dmg` / `.app`
+   - Linux x86_64 (`x86_64-unknown-linux-gnu`, built on `ubuntu-22.04`) —
+     `.deb` / `.AppImage`
 
    The `bundle.targets` in `src-tauri/tauri.conf.json` is `"all"`; on a macOS
-   runner that resolves to the `.app` and `.dmg` formats.
+   runner that resolves to the `.app` and `.dmg` formats. On Linux the
+   platform-specific `src-tauri/tauri.linux.conf.json` overrides it to
+   `["deb", "appimage"]` (deliberately no `.rpm` — the app itself only
+   installs from `.deb`/`.AppImage` assets, so it ships the formats it can
+   consume). The Linux leg builds on the oldest supported Ubuntu LTS runner so
+   the binaries link against a glibc old enough for the systems users run.
 3. **Publishes the release** (flips it from draft to published) once all build
    jobs succeed. If a build fails, the release stays a draft so nothing
    half-built is published.
 
-> **Why macOS-only?** Obtainintosh is presented as a Mac OS X program and only
-> ships a `.dmg`, so the release matrix is restricted to macOS. The Rust backend
-> is portable, so if Linux/Windows support is desired later you can extend the
-> matrix with `ubuntu-22.04` / `windows-latest` entries (adding the
-> `libwebkit2gtk-4.1-dev` Linux dependency step) the same way the other Tauri
-> repos do.
+> **Why no Windows?** The Rust backend's platform-specific pieces currently
+> exist for macOS and Linux only (installed-app detection, asset selection,
+> reveal-in-file-manager). If Windows support is desired later you can extend
+> the matrix with a `windows-latest` entry the same way the other Tauri repos
+> do, after porting those pieces.
 
 Builds are **unsigned** unless the optional signing secrets below are configured.
 An unsigned macOS app still runs, but users will see Gatekeeper warnings;
 add the Apple secrets later to enable notarization without editing the workflow.
+The Apple signing step is skipped on the Linux leg; the Linux packages are not
+signed.
 
 ## Secrets
 
