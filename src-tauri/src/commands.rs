@@ -206,13 +206,10 @@ pub async fn add_app(
     let source_type = resolve_source_type(source_type, &url)?;
     let credentials = credentials_for(source_type, username, access_token);
 
-    // Check if app is already installed
-    let (current_version, install_path) =
-        if let Some((path, version)) = crate::installer::detect_installed_app(&name) {
-            (Some(version), Some(path))
-        } else {
-            (None, None)
-        };
+    // Check if app is already installed. Off the async runtime like every
+    // other detection call: it reads directories and, on Linux, shells out to
+    // dpkg-query, which would block a worker thread here.
+    let (current_version, install_path) = detect_installed_app_off_runtime(name.clone()).await?;
 
     let app = App {
         id: String::new(),
@@ -634,6 +631,21 @@ pub async fn download_and_install(
         "Download finished: {}\n\n{reveal_message}",
         download_path.display()
     ))
+}
+
+/// One program's installed version and location, detected off the async
+/// runtime. The batch equivalent is `detect_apps_for_check`.
+async fn detect_installed_app_off_runtime(
+    name: String,
+) -> Result<(Option<String>, Option<String>), String> {
+    tokio::task::spawn_blocking(
+        move || match crate::installer::detect_installed_app(&name) {
+            Some((path, version)) => (Some(version), Some(path)),
+            None => (None, None),
+        },
+    )
+    .await
+    .map_err(|error| format!("Installed-app detection failed: {error}"))
 }
 
 /// Re-detects the installed version of every app in one blocking pass.

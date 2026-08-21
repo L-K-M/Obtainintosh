@@ -320,7 +320,7 @@ mod platform {
             if let Some(entry) = self
                 .appimages
                 .get(&normalized)
-                .and_then(|entries| entries.first())
+                .and_then(|entries| newest_appimage(entries))
             {
                 log::debug!("Found AppImage: {}", entry.path.display());
                 return Some((
@@ -332,6 +332,34 @@ mod platform {
             log::debug!("No indexed match found for {}", app_name);
             None
         }
+    }
+
+    /// The entry with the highest version among files carrying the same name.
+    /// The documented update flow downloads the new AppImage next to the old
+    /// one and removes nothing, so several versions of a program routinely sit
+    /// side by side — reporting anything but the newest would tell the user an
+    /// update they already fetched is still pending. Versions compare
+    /// numerically component-wise (1.10 beats 1.9, which file-name order gets
+    /// wrong); the scan-sorted path settles exact ties.
+    fn newest_appimage(entries: &[AppImageEntry]) -> Option<&AppImageEntry> {
+        entries.iter().reduce(|best, candidate| {
+            if version_sort_key(&candidate.version) > version_sort_key(&best.version) {
+                candidate
+            } else {
+                best
+            }
+        })
+    }
+
+    /// Numeric component-wise ordering key for versions parsed out of AppImage
+    /// file names. `looks_like_version` only lets digits-and-dots through, so
+    /// every component parses; a malformed component (empty from "1..2", or
+    /// absurdly long) just counts as 0.
+    fn version_sort_key(version: &str) -> Vec<u64> {
+        version
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
     }
 
     /// Detect if a program is installed — as a dpkg package or an AppImage in
@@ -462,10 +490,16 @@ mod platform {
     /// `name_1.2.3_amd64.AppImage`; other builders use dashes. A file without
     /// a recognizable version segment is skipped — a bare `Tool.AppImage`
     /// carries nothing to compare against a release.
+    ///
+    /// The extension is matched case-insensitively, like the asset picker's
+    /// own `.appimage` check: an asset the picker downloads must not then be
+    /// undetectable on disk because the project spells it `.APPIMAGE`.
     fn parse_appimage_file_name(file_name: &str) -> Option<(String, String)> {
+        let extension_start = file_name.len().checked_sub(".AppImage".len())?;
         let stem = file_name
-            .strip_suffix(".AppImage")
-            .or_else(|| file_name.strip_suffix(".appimage"))?;
+            .get(extension_start..)
+            .filter(|extension| extension.eq_ignore_ascii_case(".appimage"))
+            .and_then(|_| file_name.get(..extension_start))?;
 
         let segments: Vec<&str> = stem
             .split(['-', '_', ' '])
@@ -522,6 +556,11 @@ mod platform {
                 ),
                 ("My App 2.3.AppImage", ("my-app", "2.3")),
                 ("tool-v2.1.appimage", ("tool", "2.1")),
+                // The extension's case is the project's business, not ours:
+                // the asset picker matches it case-insensitively, so anything
+                // it downloads has to be detectable here.
+                ("tool-2.1.APPIMAGE", ("tool", "2.1")),
+                ("tool-2.1.AppImagE", ("tool", "2.1")),
                 // The name may itself contain separators; the first
                 // version-shaped segment ends it.
                 ("some_long_name-0.9.1.AppImage", ("some-long-name", "0.9.1")),
@@ -606,6 +645,52 @@ mod platform {
                 ))
             );
             assert_eq!(appimage_only.detect("Other"), None);
+        }
+
+        /// Several versions of an AppImage routinely sit side by side: the
+        /// documented update flow drops the new file next to the old one and
+        /// removes nothing. Reporting the older one would leave the program
+        /// stuck showing an update the user already downloaded.
+        #[test]
+        fn the_newest_appimage_wins_when_several_versions_sit_side_by_side() {
+            let entries = |versions: &[&str]| {
+                versions
+                    .iter()
+                    .map(|version| AppImageEntry {
+                        path: PathBuf::from(format!(
+                            "/home/user/Applications/Tool-{version}.AppImage"
+                        )),
+                        version: version.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            for versions in [
+                // An ordinary bump, in both scan orders.
+                ["1.5.0", "1.6.0"],
+                ["1.6.0", "1.5.0"],
+                // Numeric, not lexicographic: "1.10.0" < "1.9.0" as strings.
+                ["1.9.0", "1.10.0"],
+                ["1.10.0", "1.9.0"],
+            ] {
+                let index = InstalledAppIndex {
+                    deb_packages: HashMap::new(),
+                    appimages: HashMap::from([("tool".to_string(), entries(&versions))]),
+                };
+                let expected = if versions.contains(&"1.10.0") {
+                    "1.10.0"
+                } else {
+                    "1.6.0"
+                };
+                assert_eq!(
+                    index.detect("Tool"),
+                    Some((
+                        format!("/home/user/Applications/Tool-{expected}.AppImage"),
+                        expected.to_string()
+                    )),
+                    "scan order {versions:?}"
+                );
+            }
         }
     }
 }

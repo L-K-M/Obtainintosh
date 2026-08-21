@@ -170,6 +170,47 @@ fn target_cpu_arch() -> CpuArch {
     }
 }
 
+/// CPU families no supported build can run, spelled the ways release assets
+/// actually name them (including Debian architecture names like `ppc64el` and
+/// `armel` — the boundary check in `has_name_marker` means `ppc64` does not
+/// match inside `ppc64el`, so the long forms need their own entries).
+/// One shared list for both pickers, so an architecture learned on one
+/// platform cannot silently stay accepted on the other. Bare `x86` is absent
+/// on purpose: `_` and `-` are marker boundaries, so it would also match
+/// inside `x86_64` and `x86-64` and reject every 64-bit Intel asset.
+const UNSUPPORTED_CPU_MARKERS: &[&str] = &[
+    "armv5",
+    "armv6",
+    "armv7",
+    "armel",
+    "armhf",
+    "i386",
+    "i486",
+    "i586",
+    "i686",
+    "i786",
+    "x86_32",
+    "x86-32",
+    // 32-bit x86 by long-standing convention, like the win32/linux32 pairing.
+    "linux32",
+    "powerpc",
+    "ppc",
+    "ppc64",
+    "ppc64el",
+    "ppc64le",
+    "mips",
+    "mipsel",
+    "mips64",
+    "mips64el",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "riscv32",
+    "riscv64",
+    "loongarch64",
+    "loong64",
+];
+
 impl GitHubAdapter {
     pub fn new(token: Option<String>) -> Self {
         Self { token }
@@ -645,12 +686,9 @@ fn find_macos_asset_for_arch(
             let intel64 = ["x86_64", "x86-64", "amd64", "x64", "intel"]
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
-            let unsupported_cpu = [
-                "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786", "x86_32",
-                "x86-32", "powerpc", "ppc64", "riscv64",
-            ]
-            .iter()
-            .any(|marker| has_name_marker(&name, marker));
+            let unsupported_cpu = UNSUPPORTED_CPU_MARKERS
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
 
             if unsupported_cpu
                 || matches!(target_arch, CpuArch::X86_64) && arm64 && !intel64 && !universal
@@ -716,7 +754,10 @@ fn find_linux_asset_for_arch(
 ) -> Option<&ReleaseAsset> {
     log::debug!("Finding Linux asset from {} candidates", assets.len());
     let extensions = [".deb", ".appimage", ".tar.gz", ".zip"];
-    let linux_markers = ["linux", "linux32", "linux64", "ubuntu", "debian"];
+    // "linux32" is deliberately not a valid marker: it names a 32-bit x86
+    // build, which no supported target can run — it is rejected through
+    // UNSUPPORTED_CPU_MARKERS instead.
+    let linux_markers = ["linux", "linux64", "ubuntu", "debian"];
     let other_os_markers = [
         "windows", "win", "win32", "win64", "mac", "macos", "macosx", "darwin", "osx", "android",
         "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
@@ -751,16 +792,16 @@ fn find_linux_asset_for_arch(
                 .any(|marker| has_name_marker(&name, marker));
             // "intel" is left out on purpose: unlike macOS naming, Linux asset
             // names rarely use it for the CPU (an "intel" variant is more
-            // often about GPUs or MKL builds).
-            let x86_64 = ["x86_64", "x86-64", "amd64", "x64"]
+            // often about GPUs or MKL builds). "linux64" counts: by the same
+            // convention that makes linux32 mean 32-bit x86, it means x86_64 —
+            // and the boundary check keeps the bare "x64" marker from matching
+            // inside it, so it needs its own entry.
+            let x86_64 = ["x86_64", "x86-64", "amd64", "x64", "linux64"]
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
-            let unsupported_cpu = [
-                "armv7", "armv6", "armhf", "i386", "i486", "i586", "i686", "i786", "x86_32",
-                "x86-32", "powerpc", "ppc64", "riscv64",
-            ]
-            .iter()
-            .any(|marker| has_name_marker(&name, marker));
+            let unsupported_cpu = UNSUPPORTED_CPU_MARKERS
+                .iter()
+                .any(|marker| has_name_marker(&name, marker));
 
             let foreign_arch = match target_arch {
                 CpuArch::Arm64 => x86_64 && !arm64,
@@ -1812,6 +1853,19 @@ mod tests {
             "tool-linux-armv7.deb",
             "tool-linux-i386.deb",
             "tool-linux-riscv64.AppImage",
+            // 32-bit x86 by convention, so never runnable on a supported
+            // target — and it must not pass as a mere "Linux" marker either.
+            "tool-linux32.tar.gz",
+            "tool-linux32.AppImage",
+            // Debian architecture names: the marker boundary check means the
+            // short forms don't match inside them, so each needs its own entry
+            // in UNSUPPORTED_CPU_MARKERS.
+            "tool_1.0_ppc64el.deb",
+            "tool_1.0_armel.deb",
+            "tool_1.0_s390x.deb",
+            "tool_1.0_mips64el.deb",
+            "tool_1.0_loong64.deb",
+            "tool_1.0_sparc64.deb",
         ] {
             let assets = vec![asset(name)];
             for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
@@ -1821,6 +1875,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_linux32_is_never_chosen_over_a_64_bit_build() {
+        // The legacy naming pair: both carry a Linux marker and neither spells
+        // out a CPU the short markers match, so without linux32/linux64 being
+        // classified the name tiebreak would hand over the 32-bit build.
+        let assets = vec![asset("tool-linux32.zip"), asset("tool-linux64.zip")];
+
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux64.zip");
+
+        // linux64 names x86_64, so it is not for an arm64 machine at all.
+        assert!(find_linux_asset_for_arch(&assets, CpuArch::Arm64).is_none());
+    }
+
+    #[test]
+    fn test_linux64_counts_as_the_native_architecture() {
+        // Ranked as native (0), so it beats an architecture-unmarked build
+        // even though that one's package format would otherwise tie.
+        let assets = vec![asset("tool-linux.tar.gz"), asset("tool-linux64.tar.gz")];
+        let selected = find_linux_asset_for_arch(&assets, CpuArch::X86_64).unwrap();
+        assert_eq!(selected.name, "tool-linux64.tar.gz");
+    }
+
+    #[test]
+    fn test_unsupported_cpu_markers_are_shared_by_both_pickers() {
+        // The list exists once so an architecture learned on one platform
+        // cannot stay accepted on the other.
+        for marker in ["ppc64el", "s390x", "armel", "loong64"] {
+            let macos_asset = vec![asset(&format!("tool-macos-{marker}.dmg"))];
+            let linux_asset = vec![asset(&format!("tool-linux-{marker}.deb"))];
+            for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
+                assert!(
+                    find_macos_asset_for_arch(&macos_asset, target_arch).is_none(),
+                    "macOS picker should reject {marker}"
+                );
+                assert!(
+                    find_linux_asset_for_arch(&linux_asset, target_arch).is_none(),
+                    "Linux picker should reject {marker}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_x86_64_assets_survive_the_unsupported_cpu_list() {
+        // A bare "x86" marker would also match inside "x86_64"/"x86-64" and
+        // reject every 64-bit Intel asset, so it is deliberately absent.
+        for name in ["tool-linux-x86_64.deb", "tool-linux-x86-64.AppImage"] {
+            let assets = vec![asset(name)];
+            assert!(
+                find_linux_asset_for_arch(&assets, CpuArch::X86_64).is_some(),
+                "should accept {name}"
+            );
+        }
+        let assets = vec![asset("tool-macos-x86_64.dmg")];
+        assert!(find_macos_asset_for_arch(&assets, CpuArch::X86_64).is_some());
     }
 
     fn parse_release(json: &str) -> ForgeRelease {

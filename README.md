@@ -42,7 +42,7 @@ On Ubuntu (and other Debian-family distributions):
 ## Use Obtainintosh
 
 1. Choose **Add Program** and enter a repository URL such as `https://github.com/owner/project` or `https://codeberg.org/owner/project`.
-2. Enter the application's name so Obtainintosh can detect its installed version: on macOS, the bundle name as it appears in `/Applications` or `~/Applications`; on Linux, the name of its dpkg package (case and spaces don't matter — "My App" finds `my-app`) or of an AppImage in `~/Applications` or `~/.local/bin`.
+2. Enter the application's name so Obtainintosh can detect its installed version: on macOS, the bundle name as it appears in `/Applications` or `~/Applications`; on Linux, the name of its dpkg package (case and spaces don't matter — "My App" finds `my-app`) or of an AppImage in `~/Applications` or `~/.local/bin`. An installed package takes precedence over an AppImage of the same name, and when several versions of an AppImage sit side by side, the highest version counts as the installed one.
 3. Leave **Source** on *Detect automatically* for a `github.com` repository, and choose *Forgejo* for an instance whose address does not identify the software. See [Forgejo instances](#forgejo-instances).
 4. Check for updates. Obtainintosh also checks tracked applications when it starts.
 5. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS).
