@@ -137,10 +137,11 @@ fn select_recent_release(
     // everyone else.
     if !stable_release_published && !has_published_release(releases) {
         anyhow::bail!(
-            "No published releases found. Draft releases are invisible to \
-             anyone without write access, so a release stuck in draft — for \
-             example by a failed release workflow — shows on the releases \
-             page for its maintainers while remaining unpublished"
+            "No published releases found among the releases visible to \
+             this app. Draft releases are invisible to anyone without write \
+             access, so a release stuck in draft — for example by a failed \
+             release workflow — shows on the releases page for its \
+             maintainers while remaining unpublished"
         );
     }
 
