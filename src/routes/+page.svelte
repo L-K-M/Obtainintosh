@@ -106,6 +106,10 @@
         // cannot collide with them.
         const onKeyDown = (event: KeyboardEvent) => {
             if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+            // Ignore auto-repeat, and never swap out an already-open modal:
+            // focus can sit on a button inside it, not a text field, so a
+            // shortcut could otherwise wipe a half-filled form.
+            if (event.repeat || activeModal) return;
             // Never hijack keys while the user is typing: Ctrl+N in a field
             // is the classic Emacs-style "next line" binding, and it (or any
             // other shortcut) resetting the dialog would wipe their input.
