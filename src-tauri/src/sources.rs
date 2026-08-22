@@ -96,6 +96,14 @@ impl ForgeRelease {
     }
 }
 
+/// Whether the list contains even one published release. Drafts do not
+/// count: both forges hide them from anyone without write access, so a
+/// repository whose releases are all drafts publishes nothing as far as
+/// every reader — this app included — can see.
+fn has_published_release(releases: &[ForgeRelease]) -> bool {
+    releases.iter().any(|release| !release.draft)
+}
+
 /// Picks a release this machine can actually install out of the recent list.
 ///
 /// Whether the forge had a nominal latest release at all decides how much
@@ -115,6 +123,28 @@ fn select_recent_release(
     releases: &[ForgeRelease],
     stable_release_published: bool,
 ) -> Result<&ForgeRelease> {
+    // A list with nothing published in it gets its own message — but only
+    // when the list is the sole evidence. When `releases/latest` answered,
+    // a published release exists by definition (perhaps just outside the
+    // recent window), so the stable-channel message below stays accurate
+    // there.
+    //
+    // "No compatible release" implies releases exist and merely missed this
+    // platform; an unpublished repository is a different problem, and one
+    // that is easy to miss from the releases page, because drafts *are*
+    // shown there to the repository's maintainers — a release whose workflow
+    // failed before publishing looks present to its owner and absent to
+    // everyone else.
+    if !stable_release_published && !has_published_release(releases) {
+        anyhow::bail!(
+            "No published releases found among the releases visible to \
+             this app. Draft releases are invisible to anyone without write \
+             access, so a release stuck in draft — for example by a failed \
+             release workflow — shows on the releases page for its \
+             maintainers while remaining unpublished"
+        );
+    }
+
     if stable_release_published {
         return find_compatible_release(releases, Some(false)).with_context(|| {
             format!(
@@ -2057,5 +2087,70 @@ mod tests {
         let selected = select_recent_release(&releases, false).unwrap();
 
         assert_eq!(selected.tag_name, "v5.1.0-beta.1");
+    }
+
+    #[test]
+    fn an_empty_release_list_names_the_absence_of_published_releases() {
+        // `releases/latest` 404s and the list comes back empty: the repository
+        // has published nothing at all, which is a different problem than
+        // ten releases that all miss this platform.
+        let error = select_recent_release(&[], false).unwrap_err().to_string();
+
+        assert!(error.contains("No published releases"), "{error}");
+        assert!(error.contains("draft"), "{error}");
+        // It must not claim releases exist but miss the platform.
+        assert!(!error.contains("compatible"), "{error}");
+    }
+
+    #[test]
+    fn a_list_of_only_drafts_names_the_absence_of_published_releases() {
+        // Reachable only through a token with write access, since drafts are
+        // hidden from everyone else: every entry is a draft, each carrying an
+        // asset this machine could install, and none of it is published.
+        let releases: Vec<ForgeRelease> = ["v2.0.0", "v1.9.0"]
+            .iter()
+            .map(|tag| {
+                serde_json::from_str(&forgejo_release_json(
+                    tag,
+                    true,
+                    &compatible_asset_name("App"),
+                ))
+                .unwrap()
+            })
+            .collect();
+        assert!(releases.iter().all(|release| release.draft));
+
+        let error = select_recent_release(&releases, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("No published releases"), "{error}");
+    }
+
+    #[test]
+    fn an_all_draft_window_keeps_the_stable_channel_message_when_latest_answered() {
+        // With a write-access token the recent window can be all drafts even
+        // though `releases/latest` answered — a published release exists by
+        // definition, so the failure must stay about the stable channel, not
+        // claim the repository has nothing published at all.
+        let releases: Vec<ForgeRelease> = ["v2.0.0"]
+            .iter()
+            .map(|tag| {
+                serde_json::from_str(&forgejo_release_json(
+                    tag,
+                    true,
+                    &compatible_asset_name("App"),
+                ))
+                .unwrap()
+            })
+            .collect();
+        assert!(releases.iter().all(|release| release.draft));
+
+        let error = select_recent_release(&releases, true)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("stable"), "{error}");
+        assert!(!error.contains("No published releases"), "{error}");
     }
 }
