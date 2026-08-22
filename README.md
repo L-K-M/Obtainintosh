@@ -137,7 +137,7 @@ Bundles for the host architecture are written below `src-tauri/target/release/bu
 
 ### `No published releases found`
 
-The repository has no published releases at all. Draft releases are visible only to users with write access, so a release whose publishing step failed — for example, a release workflow that uploads assets and marks the release published only at the end — can show on the releases page for the repository's maintainers while Obtainintosh (and every other anonymous reader) sees an empty repository. Check the repository's Actions runs and publish the draft release.
+The repository has no published releases that Obtainintosh can see. Draft releases are visible only to users with write access, so a release whose publishing step failed — for example, a release workflow that uploads assets and marks the release published only at the end — can show on the releases page for the repository's maintainers while Obtainintosh (and every other anonymous reader) sees no releases at all. Check the repository's Actions runs and publish the draft release.
 
 ### No macOS-compatible or Linux-compatible asset found
 
