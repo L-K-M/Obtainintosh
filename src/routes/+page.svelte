@@ -100,8 +100,35 @@
             activeModal = {type: 'about'};
         });
 
+        // Platforms without a menu bar (Linux) keep its actions reachable as
+        // keyboard shortcuts handled here. macOS menu accelerators are
+        // Cmd-based and never reach the webview, so these plain Ctrl combos
+        // cannot collide with them.
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+            switch (event.key.toLowerCase()) {
+                case 'n':
+                    activeModal = {type: 'add', app: null};
+                    break;
+                case 'r':
+                    appStore.checkForUpdates();
+                    break;
+                case ',':
+                    activeModal = {type: 'settings'};
+                    break;
+                case 'q':
+                    void handleWindowClose();
+                    break;
+                default:
+                    return;
+            }
+            event.preventDefault();
+        };
+        window.addEventListener('keydown', onKeyDown);
+
         // Cleanup on unmount
         return () => {
+            window.removeEventListener('keydown', onKeyDown);
             unlistenFocus.then(fn => fn());
             unlistenAddApp.then(fn => fn());
             unlistenCheckAll.then(fn => fn());
@@ -248,6 +275,7 @@
                 onaddApp={() => activeModal = {type: 'add', app: null}}
                 oncheckAll={() => appStore.checkForUpdates()}
                 onsettings={() => activeModal = {type: 'settings'}}
+                onabout={() => activeModal = {type: 'about'}}
             />
 
             {#if error}
