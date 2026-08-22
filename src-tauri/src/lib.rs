@@ -8,10 +8,13 @@ mod updates;
 
 use commands::AppState;
 use std::sync::Arc;
-use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
-    Emitter, Manager,
-};
+use tauri::{Emitter, Manager};
+
+// Menu construction is macOS-only, so the imports are too — on every other
+// target no menu is built at all and the types would be unused, failing
+// clippy's `-D warnings`.
+#[cfg(target_os = "macos")]
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -31,21 +34,29 @@ pub fn run() {
                 active_download: Arc::new(Default::default()),
             });
 
-            // Create custom menu items, shared by both platforms' menus
-            let add_app =
-                MenuItem::with_id(app, "add_app", "Add App...", true, Some("CmdOrCtrl+N"))?;
-            let check_all =
-                MenuItem::with_id(app, "check_all", "Check All", true, Some("CmdOrCtrl+R"))?;
-            let settings =
-                MenuItem::with_id(app, "settings", "Settings", true, Some("CmdOrCtrl+,"))?;
-
-            // Create custom About menu item (instead of PredefinedMenuItem::about)
-            let about = MenuItem::with_id(app, "about", "About Obtainintosh", true, None::<&str>)?;
-
-            // macOS gets the full native menu bar with the standard app,
-            // Edit, and Window menus.
+            // macOS keeps the native menu bar at the top of the screen, where
+            // it carries the standard app, Edit, and Window menus. Everywhere
+            // else the menu only duplicates UI the window already has — GTK
+            // draws it inside the window, Windows puts a native menu bar
+            // under the title bar — so no menu is set there at all. The
+            // actions it carried live on the toolbar (which gains an About
+            // button), and the keyboard shortcuts are handled by the webview
+            // frontend.
             #[cfg(target_os = "macos")]
-            let menu = {
+            {
+                // Create custom menu items
+                let add_app =
+                    MenuItem::with_id(app, "add_app", "Add App...", true, Some("CmdOrCtrl+N"))?;
+                let check_all =
+                    MenuItem::with_id(app, "check_all", "Check All", true, Some("CmdOrCtrl+R"))?;
+                let settings =
+                    MenuItem::with_id(app, "settings", "Settings", true, Some("CmdOrCtrl+,"))?;
+
+                // Create custom About menu item (instead of
+                // PredefinedMenuItem::about) so the app's own dialog opens.
+                let about =
+                    MenuItem::with_id(app, "about", "About Obtainintosh", true, None::<&str>)?;
+
                 // Create the app submenu (Obtainintosh menu)
                 let app_submenu = Submenu::with_items(
                     app,
@@ -98,37 +109,10 @@ pub fn run() {
                     ],
                 )?;
 
-                Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?
-            };
+                let menu = Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?;
 
-            // Elsewhere the menu bar renders inside the window, so it stays
-            // small: one File menu carrying the app's actions and an explicit
-            // Quit (a custom item — the predefined macOS roles like Services
-            // or Hide mean nothing to GTK). Clipboard shortcuts come from the
-            // webview itself, so no Edit menu is needed.
-            #[cfg(not(target_os = "macos"))]
-            let menu = {
-                let quit = MenuItem::with_id(app, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?;
-                let file_submenu = Submenu::with_items(
-                    app,
-                    "File",
-                    true,
-                    &[
-                        &add_app,
-                        &check_all,
-                        &PredefinedMenuItem::separator(app)?,
-                        &settings,
-                        &PredefinedMenuItem::separator(app)?,
-                        &about,
-                        &PredefinedMenuItem::separator(app)?,
-                        &quit,
-                    ],
-                )?;
-
-                Menu::with_items(app, &[&file_submenu])?
-            };
-
-            app.set_menu(menu)?;
+                app.set_menu(menu)?;
+            }
 
             Ok(())
         })
@@ -152,11 +136,6 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.emit("menu-about", ());
                 }
-            }
-            // Only the non-macOS menu carries a custom Quit item; macOS uses
-            // the predefined one, which never reaches this handler.
-            "quit" => {
-                app.exit(0);
             }
             _ => {}
         })

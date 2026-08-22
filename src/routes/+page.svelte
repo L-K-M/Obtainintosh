@@ -100,8 +100,51 @@
             activeModal = {type: 'about'};
         });
 
+        // Platforms without a menu bar (Linux) keep its actions reachable as
+        // keyboard shortcuts handled here. macOS menu accelerators are
+        // Cmd-based and never reach the webview, so these plain Ctrl combos
+        // cannot collide with them.
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+            // Ignore auto-repeat, and never swap out an already-open modal:
+            // focus can sit on a button inside it, not a text field, so a
+            // shortcut could otherwise wipe a half-filled form.
+            if (event.repeat || activeModal) return;
+            // Never hijack keys while the user is typing: Ctrl+N in a field
+            // is the classic Emacs-style "next line" binding, and it (or any
+            // other shortcut) resetting the dialog would wipe their input.
+            const target = event.target;
+            const editing =
+                target instanceof HTMLInputElement ||
+                target instanceof HTMLTextAreaElement ||
+                target instanceof HTMLSelectElement ||
+                (target instanceof HTMLElement && target.isContentEditable);
+            if (editing) return;
+            switch (event.key.toLowerCase()) {
+                case 'n':
+                    activeModal = {type: 'add', app: null};
+                    break;
+                case 'r':
+                    // Leave Ctrl+R to the webview reload during development.
+                    if (import.meta.env.DEV) return;
+                    appStore.checkForUpdates();
+                    break;
+                case ',':
+                    activeModal = {type: 'settings'};
+                    break;
+                case 'q':
+                    void handleWindowClose();
+                    break;
+                default:
+                    return;
+            }
+            event.preventDefault();
+        };
+        window.addEventListener('keydown', onKeyDown);
+
         // Cleanup on unmount
         return () => {
+            window.removeEventListener('keydown', onKeyDown);
             unlistenFocus.then(fn => fn());
             unlistenAddApp.then(fn => fn());
             unlistenCheckAll.then(fn => fn());
@@ -248,6 +291,7 @@
                 onaddApp={() => activeModal = {type: 'add', app: null}}
                 oncheckAll={() => appStore.checkForUpdates()}
                 onsettings={() => activeModal = {type: 'settings'}}
+                onabout={() => activeModal = {type: 'about'}}
             />
 
             {#if error}

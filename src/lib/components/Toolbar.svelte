@@ -6,6 +6,7 @@
     export let onaddApp: (() => void) | undefined = undefined;
     export let oncheckAll: (() => void) | undefined = undefined;
     export let onsettings: (() => void) | undefined = undefined;
+    export let onabout: (() => void) | undefined = undefined;
 </script>
 
 <div class="toolbar">
@@ -24,6 +25,9 @@
     <div class="toolbar-group">
         <Button onclick={onsettings}>
             Settings
+        </Button>
+        <Button onclick={onabout}>
+            About
         </Button>
     </div>
 </div>
