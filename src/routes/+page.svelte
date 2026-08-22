@@ -106,11 +106,23 @@
         // cannot collide with them.
         const onKeyDown = (event: KeyboardEvent) => {
             if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+            // Never hijack keys while the user is typing: Ctrl+N in a field
+            // is the classic Emacs-style "next line" binding, and it (or any
+            // other shortcut) resetting the dialog would wipe their input.
+            const target = event.target;
+            const editing =
+                target instanceof HTMLInputElement ||
+                target instanceof HTMLTextAreaElement ||
+                target instanceof HTMLSelectElement ||
+                (target instanceof HTMLElement && target.isContentEditable);
+            if (editing) return;
             switch (event.key.toLowerCase()) {
                 case 'n':
                     activeModal = {type: 'add', app: null};
                     break;
                 case 'r':
+                    // Leave Ctrl+R to the webview reload during development.
+                    if (import.meta.env.DEV) return;
                     appStore.checkForUpdates();
                     break;
                 case ',':

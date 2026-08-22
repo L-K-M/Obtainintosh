@@ -36,11 +36,12 @@ pub fn run() {
 
             // macOS keeps the native menu bar at the top of the screen, where
             // it carries the standard app, Edit, and Window menus. Everywhere
-            // else a Tauri menu renders as a menu bar *inside* the window,
-            // where it only duplicates the toolbar and the custom title bar's
-            // close button — so no menu is set there at all. The actions it
-            // carried live on the toolbar (which gains an About button), and
-            // the keyboard shortcuts are handled by the webview frontend.
+            // else the menu only duplicates UI the window already has — GTK
+            // draws it inside the window, Windows puts a native menu bar
+            // under the title bar — so no menu is set there at all. The
+            // actions it carried live on the toolbar (which gains an About
+            // button), and the keyboard shortcuts are handled by the webview
+            // frontend.
             #[cfg(target_os = "macos")]
             {
                 // Create custom menu items
