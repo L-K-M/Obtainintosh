@@ -84,8 +84,23 @@ jobs:
           # only ever returns a *published* release, so fall back to scanning
           # the paginated release list — the only way to find a draft left
           # behind by a failed earlier run.
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
-            --jq '.id' 2>/dev/null || true)"
+          # `gh api --jq` prints the API's error body on stdout for a non-2xx
+          # reply, and `|| true` hides the exit status — so an unguarded
+          # capture yields a JSON blob where an id belongs, and `[ -n ... ]`
+          # then treats it as a hit. A tag being released for the first time
+          # has no release yet, so that 404 is the *normal* path: it is why
+          # every tag-triggered run since v1.0.0 died here, PATCHing
+          # `releases/{"message":"Not Found"...}`. Keep only a bare numeric
+          # id; anything else means "no release found".
+          numeric_id() {
+            case "$1" in
+              ''|*[!0-9]*) printf '' ;;
+              *) printf '%s' "$1" ;;
+            esac
+          }
+
+          release_id="$(numeric_id "$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            --jq '.id' 2>/dev/null || true)")"
           if [ -n "$release_id" ]; then
             # The tag lookup only returns published releases, and this rebuild
             # is about to delete-and-replace its assets one by one. Flip the
@@ -101,10 +116,10 @@ jobs:
             # concatenated arrays and head takes the first match, if any.
             # Worst case (tag has no release at all) this walks every page,
             # which is fine for a workflow that runs once per release.
-            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
+            release_id="$(numeric_id "$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
               | jq -r --arg tag "$RELEASE_TAG" \
                   '.[] | select(.tag_name == $tag) | .id' \
-              | head -n1)"
+              | head -n1)")"
           fi
           if [ -n "$release_id" ]; then
             echo "Reusing existing release ${release_id} for ${RELEASE_TAG}"
@@ -116,14 +131,20 @@ jobs:
             # -F/--field (not -f/--raw-field) for draft/prerelease/notes:
             # gh coerces "true"/"false" into JSON booleans; --raw-field would
             # send the string "true" and the API would reject it.
-            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+            release_id="$(numeric_id "$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
               --method POST \
               --raw-field tag_name="$RELEASE_TAG" \
               --raw-field name="Obtainintosh ${RELEASE_TAG}" \
               --field draft=true \
               --field prerelease="$prerelease" \
               --field generate_release_notes=true \
-              --jq '.id')"
+              --jq '.id')")"
+            # Never hand a non-id downstream: every build job uploads into
+            # this release, and publish-release PATCHes it public at the end.
+            if [ -z "$release_id" ]; then
+              echo "::error::Creating a release for ${RELEASE_TAG} did not return a numeric id"
+              exit 1
+            fi
             echo "Created draft release ${release_id} for ${RELEASE_TAG}"
           fi
           echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
