@@ -967,6 +967,9 @@ fn ensure_private_cache_directory(path: &Path) -> Result<()> {
 
 fn create_private_directory(path: &Path) -> Result<()> {
     let mut builder = std::fs::DirBuilder::new();
+    // Recursive because the download directory is nested per app and version
+    // below the cache root, and intermediate levels may not exist yet.
+    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
