@@ -609,7 +609,8 @@ pub async fn download_and_install(
         Err(error) => {
             log::warn!("Failed to reveal the download: {error}");
             format!(
-                "The file could not be revealed in {FILE_MANAGER_NAME} ({error}). Please open its containing folder manually."
+                "The file could not be revealed in {FILE_MANAGER_NAME} ({:#}). Please open its containing folder manually.",
+                error
             )
         }
     };
@@ -855,18 +856,49 @@ fn validate_download_size(actual: u64, expected: u64) -> Result<()> {
     Ok(())
 }
 
-/// Reveals a file in the platform's file browser, reporting whether it
-/// actually worked. The caller tells the user what happened, so a failure here
-/// must not be swallowed.
+/// Reveals a file in the platform's file browser, retrying a bounded number
+/// of times.
 ///
-/// Runs on a blocking thread: the macOS side shells out and the Linux side
-/// makes a blocking D-Bus call, neither of which belongs on the async runtime
-/// (zbus's blocking API in particular must never run inside one).
+/// The retry exists for the Linux path: the reveal is a session-bus call to
+/// `org.freedesktop.FileManager1`, and on a desktop where that service has
+/// not run yet, activating it can take longer than the D-Bus client's method
+/// timeout — the first reveal fails while the activation it triggered is
+/// still finishing, and every later one succeeds. Retrying after a pause
+/// turns that permanent-looking failure into a short delay; once the service
+/// is up the first attempt succeeds and the retries never run.
+///
+/// If a timed-out call did open a window after all, a retry can open a second
+/// one — an acceptable trade for the file reliably showing up at all.
+///
+/// Runs each attempt on a blocking thread: the macOS side shells out and the
+/// Linux side makes a blocking D-Bus call, neither of which belongs on the
+/// async runtime (zbus's blocking API in particular must never run inside
+/// one).
 async fn reveal_download(path: &Path) -> Result<()> {
+    const ATTEMPTS: u32 = 3;
+    const RETRY_PAUSE: Duration = Duration::from_secs(1);
+
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || reveal_download_blocking(&path))
-        .await
-        .context("the reveal task failed")?
+    let mut last_error = None;
+    for attempt in 1..=ATTEMPTS {
+        let candidate = path.clone();
+        let result = tokio::task::spawn_blocking(move || reveal_download_blocking(&candidate))
+            .await
+            .context("the reveal task failed")?;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                log::warn!("Reveal attempt {attempt} of {ATTEMPTS} failed: {error:?}");
+                last_error = Some(error);
+                if attempt < ATTEMPTS {
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+            }
+        }
+    }
+    Err(last_error
+        .expect("the loop ran at least once")
+        .context(format!("reveal failed after {ATTEMPTS} attempts")))
 }
 
 #[cfg(target_os = "macos")]
