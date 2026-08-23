@@ -609,7 +609,8 @@ pub async fn download_and_install(
         Err(error) => {
             log::warn!("Failed to reveal the download: {error}");
             format!(
-                "The file could not be revealed in {FILE_MANAGER_NAME} ({error}). Please open its containing folder manually."
+                "The file could not be revealed in {FILE_MANAGER_NAME} ({:#}). Please open its containing folder manually.",
+                error
             )
         }
     };
@@ -895,7 +896,9 @@ async fn reveal_download(path: &Path) -> Result<()> {
             }
         }
     }
-    Err(last_error.expect("the loop ran at least once"))
+    Err(last_error
+        .expect("the loop ran at least once")
+        .context(format!("reveal failed after {ATTEMPTS} attempts")))
 }
 
 #[cfg(target_os = "macos")]
