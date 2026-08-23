@@ -1,6 +1,6 @@
 <script lang="ts">
     import type { App } from '$lib/types';
-    import { BalloonHelp, Button, DownloadIcon, EditIcon, TrashIcon } from '@lkmc/system7-ui';
+    import { BalloonHelp, Button, DownloadIcon, EditIcon, FolderIcon, TrashIcon } from '@lkmc/system7-ui';
     import alertIcon from '$lib/assets/alert-icon.png';
 
 
@@ -9,6 +9,7 @@
     export let hasUpdate: boolean;
     export let onopenurl: ((url: string) => void) | undefined = undefined;
     export let oninstall: ((id: string) => void) | undefined = undefined;
+    export let onreveal: ((id: string) => void) | undefined = undefined;
     export let onedit: ((app: App) => void) | undefined = undefined;
     export let onremove: ((id: string) => void) | undefined = undefined;
 
@@ -17,6 +18,10 @@
 
     $: iconUrl = getIconUrl(app);
     $: failedCheckHelp = getFailedCheckHelp(app);
+    // The cached file only stands in for the download button while it matches
+    // the release the app would fetch: once a newer version is out, the button
+    // goes back to offering the download.
+    $: downloadedLatest = !!app.downloaded && app.downloaded.version === app.latest_version;
 
     // A failed check leaves any previously known latest version in place, so
     // the tooltip has to say that the figure beside it is from an earlier run.
@@ -121,7 +126,13 @@
     </td>
     <td class="col-actions">
         <div class="action-buttons">
-            {#if hasUpdate}
+            {#if downloadedLatest}
+                <BalloonHelp message="This version's file is already downloaded — show it in the file manager">
+                    <Button variant="icon" onclick={() => { if(onreveal) onreveal(app.id); }}>
+                        <FolderIcon alt="Show in file manager"/>
+                    </Button>
+                </BalloonHelp>
+            {:else if hasUpdate}
                 <BalloonHelp message="Download and save the update for this program">
                     <Button variant="icon" onclick={() => { if(oninstall) oninstall(app.id); }}>
                         <DownloadIcon alt="Update"/>

@@ -209,6 +209,10 @@
         appStore.downloadAndInstall(appId);
     }
 
+    function handleReveal(appId: string) {
+        appStore.revealDownload(appId);
+    }
+
     async function handleOpenUrl(url: string) {
         try {
             await openUrl(url);
@@ -303,6 +307,7 @@
                 {loading}
                 onopenurl={handleOpenUrl}
                 oninstall={handleInstall}
+                onreveal={handleReveal}
                 onedit={handleEdit}
                 onremove={handleRemove}
             />

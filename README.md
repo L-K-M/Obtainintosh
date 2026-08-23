@@ -45,7 +45,7 @@ On Ubuntu (and other Debian-family distributions):
 2. Enter the application's name so Obtainintosh can detect its installed version: on macOS, the bundle name as it appears in `/Applications` or `~/Applications`; on Linux, the name of its dpkg package (case and spaces don't matter — "My App" finds `my-app`) or of an AppImage in `~/Applications` or `~/.local/bin`. An installed package takes precedence over an AppImage of the same name, and when several versions of an AppImage sit side by side, the highest version counts as the installed one.
 3. Leave **Source** on *Detect automatically* for a `github.com` repository, and choose *Forgejo* for an instance whose address does not identify the software. See [Forgejo instances](#forgejo-instances).
 4. Check for updates. Obtainintosh also checks tracked applications when it starts.
-5. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS).
+5. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS). If the latest version's file is already in that directory, the download button is replaced by a folder button that reveals the cached file instead of downloading it again; the download button returns once a newer version is released or the file is cleared from the temporary directory.
 6. Open the downloaded file (`.dmg`, `.pkg`, `.deb`, archive, …) and complete installation manually. An `.AppImage` just needs to be marked executable and moved wherever you keep AppImages.
 
 Obtainintosh reads the latest published release. If a repository has no normal latest release, it can fall back to the newest non-draft release, including a prerelease.
@@ -103,7 +103,7 @@ Public repositories work without a token, but unauthenticated GitHub API request
 ## Data locations
 
 - Tracked applications, settings, tokens, and Forgejo application keys: `~/Library/Application Support/Obtainintosh/apps.json` on macOS; `$XDG_DATA_HOME/Obtainintosh/apps.json` (usually `~/.local/share/Obtainintosh/apps.json`) on Linux
-- Downloads: the system temporary directory under `obtainintosh-downloads`
+- Downloads: the system temporary directory under `obtainintosh-downloads`, one directory per program and version (`obtainintosh-downloads/<program>/<version>/<file>`)
 
 The download directory is temporary and may be cleared by the operating system. Move files elsewhere if you need to keep them.
 

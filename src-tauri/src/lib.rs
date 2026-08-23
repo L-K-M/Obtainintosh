@@ -146,6 +146,7 @@ pub fn run() {
             commands::remove_app,
             commands::check_for_updates,
             commands::download_and_install,
+            commands::reveal_downloaded_file,
             commands::get_settings,
             commands::update_settings,
             updates::check_self_update,

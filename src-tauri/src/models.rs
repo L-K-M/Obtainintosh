@@ -97,6 +97,12 @@ pub struct App {
     /// `latest_version` from a current one.
     #[serde(default)]
     pub last_check_attempt: Option<CheckAttempt>,
+    /// The release file a completed download left in the cache, if any:
+    /// `None` until the first download and again once the cached file is found
+    /// to be gone. `#[serde(default)]` keeps data files written before this
+    /// field existed loadable.
+    #[serde(default)]
+    pub downloaded: Option<DownloadedRelease>,
     /// Credentials for a forge instance that needs them — currently only
     /// Forgejo, where a private instance rejects anonymous API reads. Stored
     /// per app rather than globally because every self-hosted instance issues
@@ -123,6 +129,7 @@ impl std::fmt::Debug for App {
             .field("install_path", &self.install_path)
             .field("last_checked", &self.last_checked)
             .field("last_check_attempt", &self.last_check_attempt)
+            .field("downloaded", &self.downloaded)
             .field("username", &self.username)
             .field(
                 "access_token",
@@ -130,6 +137,17 @@ impl std::fmt::Debug for App {
             )
             .finish()
     }
+}
+
+/// The release file a download left behind: which version it is and where it
+/// sits in the cache, so the UI can offer "show it in the file manager"
+/// instead of downloading the same release again. The file lives in the
+/// system's temporary directory, so the record can go stale — anything
+/// reading it must be prepared for the path to have vanished.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadedRelease {
+    pub version: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

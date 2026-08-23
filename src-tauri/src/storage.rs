@@ -332,6 +332,30 @@ impl Storage {
         Ok(data.settings.clone())
     }
 
+    /// Clears the `downloaded` record of the named apps, persisting only when
+    /// something actually changed. Used to drop records whose cached file has
+    /// vanished — the download cache sits in the system's temporary directory,
+    /// which the OS clears on its own schedule, so records go stale on their
+    /// own and are re-verified whenever the app list is read.
+    pub fn forget_downloads(&self, app_ids: &[String]) -> Result<usize> {
+        if app_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut data = self.data.lock().unwrap();
+        let mut proposed = data.clone();
+        let cleared = proposed
+            .apps
+            .iter_mut()
+            .filter(|app| app_ids.contains(&app.id) && app.downloaded.is_some())
+            .map(|app| app.downloaded = None)
+            .count();
+        if cleared > 0 {
+            self.persist(&proposed)?;
+            *data = proposed;
+        }
+        Ok(cleared)
+    }
+
     /// Applies the outcome of a check that ran against `snapshot`, writing only
     /// the fields a check owns and only if the record still matches what was
     /// checked.
@@ -503,6 +527,71 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn forget_downloads_clears_only_the_named_apps() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let mut data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        let mut with_record = test_app("gone", "https://github.com/owner/gone");
+        with_record.downloaded = Some(crate::models::DownloadedRelease {
+            version: "1.0".to_string(),
+            path: "/tmp/nowhere/App.dmg".to_string(),
+        });
+        let mut keeps_record = test_app("kept", "https://github.com/owner/kept");
+        keeps_record.downloaded = Some(crate::models::DownloadedRelease {
+            version: "2.0".to_string(),
+            path: "/tmp/still-there/App.dmg".to_string(),
+        });
+        data.apps.push(with_record);
+        data.apps.push(keeps_record);
+        fs::write(&file_path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let storage = Storage::load_from_path(file_path.clone()).unwrap();
+
+        // The named app's record is cleared, the unnamed app's stays, and an
+        // unknown id changes nothing.
+        let cleared = storage
+            .forget_downloads(&["gone".to_string(), "unknown".to_string()])
+            .unwrap();
+        assert_eq!(cleared, 1);
+        let apps = storage.get_all_apps().unwrap();
+        assert!(apps
+            .iter()
+            .find(|app| app.id == "gone")
+            .unwrap()
+            .downloaded
+            .is_none());
+        assert_eq!(
+            apps.iter().find(|app| app.id == "kept").unwrap().downloaded,
+            Some(crate::models::DownloadedRelease {
+                version: "2.0".to_string(),
+                path: "/tmp/still-there/App.dmg".to_string(),
+            })
+        );
+
+        // Nothing left to clear, so nothing is written and no count lies.
+        assert_eq!(storage.forget_downloads(&["gone".to_string()]).unwrap(), 0);
+
+        // The cleanup was persisted: a fresh load of the same file agrees
+        // that only the named record is gone.
+        let reloaded = Storage::load_from_path(file_path).unwrap();
+        let apps = reloaded.get_all_apps().unwrap();
+        assert!(apps
+            .iter()
+            .find(|app| app.id == "gone")
+            .unwrap()
+            .downloaded
+            .is_none());
+        assert!(apps
+            .iter()
+            .find(|app| app.id == "kept")
+            .unwrap()
+            .downloaded
+            .is_some());
+    }
+
     #[test]
     fn startup_tightens_an_existing_apps_file_without_rewriting_it() {
         let temp_dir = TestDir::new();
@@ -684,6 +773,7 @@ mod tests {
             install_path: None,
             last_checked: None,
             last_check_attempt: None,
+            downloaded: None,
             username: None,
             access_token: None,
         }
@@ -933,6 +1023,7 @@ mod tests {
                 install_path: None,
                 last_checked: None,
                 last_check_attempt: None,
+                downloaded: None,
                 username: None,
                 access_token: None,
             });
