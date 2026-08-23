@@ -9,6 +9,7 @@
     export let loading = false;
     export let onopenurl: ((url: string) => void) | undefined = undefined;
     export let oninstall: ((id: string) => void) | undefined = undefined;
+    export let onreveal: ((id: string) => void) | undefined = undefined;
     export let onedit: ((app: App) => void) | undefined = undefined;
     export let onremove: ((id: string) => void) | undefined = undefined;
 
@@ -161,6 +162,7 @@
                 hasUpdate={hasUpdate(app)}
                 onopenurl={onopenurl}
                 oninstall={oninstall}
+                onreveal={onreveal}
                 onedit={onedit}
                 onremove={onremove}
             />

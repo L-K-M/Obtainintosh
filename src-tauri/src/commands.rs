@@ -1,5 +1,6 @@
 use crate::models::{
-    bounded_check_message, App, CheckAttempt, CheckAttemptState, Settings, SourceType, SystemColors,
+    bounded_check_message, App, CheckAttempt, CheckAttemptState, DownloadedRelease, Settings,
+    SourceType, SystemColors,
 };
 use crate::sources::{DownloadAuth, ForgeCredentials, ForgejoAdapter, GitHubAdapter};
 use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
@@ -161,7 +162,35 @@ fn skipped_check_outcome(app: &App, application: PendingResultApplication) -> Ch
 
 #[tauri::command]
 pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String> {
-    state.storage.get_all_apps().map_err(|e| e.to_string())
+    let mut apps = state.storage.get_all_apps().map_err(|e| e.to_string())?;
+
+    // The download cache lives in the system's temporary directory, which the
+    // OS clears on its own schedule — usually a reboot — so a `downloaded`
+    // record must be re-verified against the disk whenever the list is read,
+    // or the UI would keep offering to reveal a file that is no longer there.
+    let vanished: Vec<String> = apps
+        .iter()
+        .filter(|app| {
+            app.downloaded
+                .as_ref()
+                .is_some_and(|downloaded| !Path::new(&downloaded.path).is_file())
+        })
+        .map(|app| app.id.clone())
+        .collect();
+    if !vanished.is_empty() {
+        // Best-effort: failing to persist this bookkeeping must not fail the
+        // whole app-list load — the stale records are simply re-checked and
+        // re-cleared on the next successful load.
+        if let Err(e) = state.storage.forget_downloads(&vanished) {
+            log::warn!("Failed to clear vanished download records: {e}");
+        }
+        for app in apps.iter_mut() {
+            if vanished.contains(&app.id) {
+                app.downloaded = None;
+            }
+        }
+    }
+    Ok(apps)
 }
 
 /// The forge a URL belongs to: the type the user picked in the dialog, or a
@@ -221,6 +250,7 @@ pub async fn add_app(
         install_path,
         last_checked: None,
         last_check_attempt: None,
+        downloaded: None,
         username: credentials.username().map(str::to_string),
         access_token: credentials.token().map(str::to_string),
     };
@@ -255,9 +285,11 @@ pub async fn update_app(
     // Update fields
     app.name = name;
     if app.source_url != url {
-        // Version info from the old source is meaningless for the new one
+        // Version info from the old source is meaningless for the new one —
+        // and so is any file downloaded from it.
         app.latest_version = None;
         app.last_checked = None;
+        app.downloaded = None;
         app.source_url = url;
     }
 
@@ -491,6 +523,52 @@ pub fn get_system_colors() -> Result<SystemColors, String> {
     Ok(system_colors::get_system_colors())
 }
 
+/// Reveals the file a completed download left in the cache — the action
+/// behind the folder button that replaces the download button once the
+/// latest version's file is already on disk.
+#[tauri::command]
+pub async fn reveal_downloaded_file(
+    app_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let app = state
+        .storage
+        .get_app(&app_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "App not found".to_string())?;
+    let downloaded = app
+        .downloaded
+        .clone()
+        .ok_or_else(|| "No downloaded file is recorded for this program".to_string())?;
+    let path = PathBuf::from(&downloaded.path);
+
+    // The cache is temporary; the file can vanish between the list being read
+    // and this click. Forget the stale record so the UI offers the download
+    // again, and say what happened rather than revealing a ghost.
+    if !path.is_file() {
+        // Clear only this field — a full-record rewrite from the snapshot read
+        // at the start of the command would clobber the results of a check
+        // that completes concurrently.
+        state
+            .storage
+            .forget_downloads(&[app_id])
+            .map_err(|e| e.to_string())?;
+        return Err(format!(
+            "The downloaded file for version {} is no longer on disk — the download \
+             folder is temporary and may have been cleared. Download it again.",
+            downloaded.version
+        ));
+    }
+
+    reveal_download(&path)
+        .await
+        .map_err(|e| format!("The file could not be revealed in {FILE_MANAGER_NAME}: {e}"))?;
+    Ok(format!(
+        "The file for version {} was revealed in {FILE_MANAGER_NAME}.",
+        downloaded.version
+    ))
+}
+
 #[tauri::command]
 pub async fn download_and_install(
     app_id: String,
@@ -563,6 +641,8 @@ pub async fn download_and_install(
         &release.file_name,
         expected_size,
         download_auth.as_ref(),
+        &app.id,
+        &release.version,
         move |downloaded, total| {
             let _ = progress_handle.emit(
                 "download-progress",
@@ -622,6 +702,12 @@ pub async fn download_and_install(
     // release we just fetched — otherwise a successful download still shows
     // the latest version as unknown.
     updated_app.latest_version = Some(release.version.clone());
+    // Remember what the cache now holds, so the UI can offer "show it in the
+    // file manager" instead of a download button for this version.
+    updated_app.downloaded = Some(DownloadedRelease {
+        version: release.version.clone(),
+        path: download_path.to_string_lossy().into_owned(),
+    });
     state
         .storage
         .update_app(updated_app)
@@ -785,27 +871,76 @@ impl PartialDownload {
 impl Drop for PartialDownload {
     fn drop(&mut self) {
         if !self.published {
+            // Scratch only: the partial file, plus the directory when nothing
+            // else is in it. A completed file from an earlier download of the
+            // same version may sit in that directory — since the download
+            // location is shared per app and version, a failed re-download
+            // must not delete the file the earlier success left behind.
+            // (`remove_dir` on a non-empty directory simply fails, which the
+            // `let _` already ignores.)
             let _ = std::fs::remove_file(&self.paths.partial);
-            let _ = std::fs::remove_file(&self.paths.completed);
             let _ = std::fs::remove_dir(&self.paths.directory);
         }
     }
 }
 
-fn download_paths(root: &Path, filename: &str, operation_id: uuid::Uuid) -> Result<DownloadPaths> {
-    // Asset names come from the forge API; keep only the final path component
-    // so a malicious name can't escape the operation directory.
+/// The download cache is shared per app and version, so the newest download
+/// of a release replaces any older copy instead of piling up duplicates —
+/// and so "this version's file is already downloaded" is a single existence
+/// check on a path that can be recomputed from the app alone.
+fn download_paths(
+    root: &Path,
+    app_key: &str,
+    version: &str,
+    filename: &str,
+) -> Result<DownloadPaths> {
+    // Asset names and version tags come from the forge API; keep only the
+    // final path component of each so a malicious value can't escape the
+    // cache directory.
+    let app_key = safe_path_component(app_key);
+    let version = safe_path_component(version);
     let filename = Path::new(filename)
         .file_name()
         .and_then(|name| name.to_str())
         .context("Invalid asset file name")?;
-    let directory = root.join(operation_id.to_string());
+    let directory = root.join(app_key).join(version);
 
     Ok(DownloadPaths {
         partial: directory.join(format!("{filename}.part")),
         completed: directory.join(filename),
         directory,
     })
+}
+
+/// Reduces one piece of forge-supplied text (an app id, a version tag) to a
+/// single safe path component: the final path component of whatever arrived
+/// (so `../` cannot traverse), with any remaining character outside
+/// `[A-Za-z0-9._-]` folded to `_` — a version like `1.0+meta` becomes
+/// `1.0_meta`. Two distinct values can collide only by folding to the same
+/// component, and a collision merely makes them share a directory whose file
+/// the newer download replaces; nothing can escape the cache root. An empty
+/// result (e.g. the input was `..`) becomes `_` so a component is always
+/// produced.
+fn safe_path_component(component: &str) -> String {
+    let last = Path::new(component)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let folded: String = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if folded.is_empty() {
+        "_".to_string()
+    } else {
+        folded
+    }
 }
 
 fn set_private_directory_permissions(path: &Path) -> Result<()> {
@@ -836,6 +971,9 @@ fn ensure_private_cache_directory(path: &Path) -> Result<()> {
 
 fn create_private_directory(path: &Path) -> Result<()> {
     let mut builder = std::fs::DirBuilder::new();
+    // Recursive because the download directory is nested per app and version
+    // below the cache root, and intermediate levels may not exist yet.
+    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -940,6 +1078,8 @@ async fn download_file(
     filename: &str,
     expected_size: u64,
     auth: Option<&DownloadAuth>,
+    app_key: &str,
+    version: &str,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<PathBuf> {
     log::debug!(
@@ -982,7 +1122,7 @@ async fn download_file(
 
     let cache_dir = std::env::temp_dir().join("obtainintosh-downloads");
     ensure_private_cache_directory(&cache_dir)?;
-    let paths = download_paths(&cache_dir, filename, uuid::Uuid::new_v4())?;
+    let paths = download_paths(&cache_dir, app_key, version, filename)?;
     create_private_directory(&paths.directory)?;
     let mut partial_download = PartialDownload::new(paths);
     log::debug!(
@@ -1099,36 +1239,61 @@ mod tests {
     }
 
     #[test]
-    fn download_paths_are_scoped_to_the_operation_directory() {
+    fn download_paths_are_scoped_to_the_app_and_version() {
         let root = Path::new("/tmp/cache");
-        let id = uuid::Uuid::nil();
-        let paths = download_paths(root, "App.dmg", id).unwrap();
+        let paths = download_paths(root, "app-1", "1.2.0", "App.dmg").unwrap();
 
-        assert_eq!(paths.directory, root.join(id.to_string()));
+        assert_eq!(paths.directory, root.join("app-1").join("1.2.0"));
         assert_eq!(paths.completed, paths.directory.join("App.dmg"));
         assert_eq!(paths.partial, paths.directory.join("App.dmg.part"));
     }
 
     #[test]
-    fn download_paths_keep_a_traversing_asset_name_inside_the_directory() {
+    fn the_same_app_and_version_always_share_a_download_directory() {
+        // The deterministic location is what makes "already downloaded" a
+        // simple existence check — and what keeps a re-download from piling
+        // up a second copy of the same release.
         let root = Path::new("/tmp/cache");
-        let id = uuid::Uuid::nil();
+        let first = download_paths(root, "app-1", "1.2.0", "App.dmg").unwrap();
+        let second = download_paths(root, "app-1", "1.2.0", "App.dmg").unwrap();
 
-        let paths = download_paths(root, "../../etc/passwd", id).unwrap();
+        assert_eq!(first.directory, second.directory);
+        assert_eq!(first.completed, second.completed);
 
-        assert_eq!(paths.completed, paths.directory.join("passwd"));
-        assert_eq!(paths.completed.parent(), Some(paths.directory.as_path()));
-        assert!(download_paths(root, "..", id).is_err());
+        // A different version — or a different app — gets its own directory.
+        let other_version = download_paths(root, "app-1", "1.3.0", "App.dmg").unwrap();
+        let other_app = download_paths(root, "app-2", "1.2.0", "App.dmg").unwrap();
+        assert_ne!(first.directory, other_version.directory);
+        assert_ne!(first.directory, other_app.directory);
     }
 
     #[test]
-    fn two_operations_never_share_a_download_directory() {
+    fn unsafe_version_and_app_components_cannot_escape_the_cache() {
         let root = Path::new("/tmp/cache");
-        let first = download_paths(root, "App.dmg", uuid::Uuid::new_v4()).unwrap();
-        let second = download_paths(root, "App.dmg", uuid::Uuid::new_v4()).unwrap();
+        let paths =
+            download_paths(root, "../../etc", "1.0/../../evil", "../../etc/passwd").unwrap();
 
-        assert_ne!(first.directory, second.directory);
-        assert_ne!(first.completed, second.completed);
+        // Every piece is reduced to its final component, so traversal stays
+        // inside the cache root.
+        assert_eq!(paths.directory, root.join("etc").join("evil"));
+        assert_eq!(paths.completed, paths.directory.join("passwd"));
+        assert!(paths.completed.starts_with(root));
+
+        // Non-filename-safe characters fold to underscores rather than
+        // becoming separators or illegal names.
+        assert_eq!(safe_path_component("1.0+meta:2"), "1.0_meta_2");
+        assert_eq!(safe_path_component(".."), "_");
+    }
+
+    #[test]
+    fn download_paths_keep_a_traversing_asset_name_inside_the_directory() {
+        let root = Path::new("/tmp/cache");
+
+        let paths = download_paths(root, "app-1", "1.0", "../../etc/passwd").unwrap();
+
+        assert_eq!(paths.completed, paths.directory.join("passwd"));
+        assert_eq!(paths.completed.parent(), Some(paths.directory.as_path()));
+        assert!(download_paths(root, "app-1", "1.0", "..").is_err());
     }
 
     #[test]
@@ -1140,11 +1305,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unpublished_partial_download_cleans_up_its_directory() {
+    fn an_unpublished_partial_download_cleans_up_after_itself() {
         let root =
             std::env::temp_dir().join(format!("obtainintosh-dl-test-{}", uuid::Uuid::new_v4()));
         ensure_private_cache_directory(&root).unwrap();
-        let paths = download_paths(&root, "App.dmg", uuid::Uuid::new_v4()).unwrap();
+        let paths = download_paths(&root, "app-1", "1.0", "App.dmg").unwrap();
         create_private_directory(&paths.directory).unwrap();
         let partial = paths.partial.clone();
         let directory = paths.directory.clone();
@@ -1153,7 +1318,35 @@ mod tests {
         drop(PartialDownload::new(paths));
 
         assert!(!partial.exists(), "partial file survived");
-        assert!(!directory.exists(), "operation directory survived");
+        assert!(!directory.exists(), "empty directory survived");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_redownload_keeps_the_earlier_completed_file() {
+        // The download location is shared per app and version, so a completed
+        // file may already sit in the directory when a re-download of the same
+        // release fails. Dropping the failed attempt must remove only the
+        // partial — deleting the completed file would throw away the one good
+        // copy the user has.
+        let root =
+            std::env::temp_dir().join(format!("obtainintosh-dl-test-{}", uuid::Uuid::new_v4()));
+        ensure_private_cache_directory(&root).unwrap();
+        let paths = download_paths(&root, "app-1", "1.0", "App.dmg").unwrap();
+        create_private_directory(&paths.directory).unwrap();
+        let completed = paths.completed.clone();
+        std::fs::write(&completed, b"the earlier good file").unwrap();
+        let partial = paths.partial.clone();
+        std::fs::write(&partial, b"half a re-download").unwrap();
+
+        drop(PartialDownload::new(paths));
+
+        assert!(!partial.exists(), "partial file survived");
+        assert_eq!(
+            std::fs::read(&completed).unwrap(),
+            b"the earlier good file",
+            "the earlier completed file was deleted by a failed re-download"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1162,7 +1355,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("obtainintosh-dl-test-{}", uuid::Uuid::new_v4()));
         ensure_private_cache_directory(&root).unwrap();
-        let paths = download_paths(&root, "App.dmg", uuid::Uuid::new_v4()).unwrap();
+        let paths = download_paths(&root, "app-1", "1.0", "App.dmg").unwrap();
         create_private_directory(&paths.directory).unwrap();
         let completed = paths.completed.clone();
         std::fs::write(&completed, b"a whole file").unwrap();

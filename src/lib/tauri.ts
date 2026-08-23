@@ -26,6 +26,10 @@ export class TauriService {
         return await invoke('download_and_install', { appId });
     }
 
+    static async revealDownloadedFile(appId: string): Promise<string> {
+        return await invoke('reveal_downloaded_file', { appId });
+    }
+
     static async getSettings(): Promise<Settings> {
         return await invoke('get_settings');
     }

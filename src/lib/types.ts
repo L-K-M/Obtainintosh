@@ -19,6 +19,12 @@ export interface CheckOutcome {
   message: string | null;
 }
 
+/** A release file a completed download left in the cache. */
+export interface DownloadedRelease {
+  version: string;
+  path: string;
+}
+
 export interface App {
   id: string;
   name: string;
@@ -30,6 +36,8 @@ export interface App {
   last_checked: string | null;
   /** The most recent attempt, successful or not; null before the first check. */
   last_check_attempt: CheckAttempt | null;
+  /** The cached release file, when its version is downloaded already. */
+  downloaded: DownloadedRelease | null;
   /** Forgejo instance credentials; null for sources that need none. */
   username: string | null;
   access_token: string | null;

@@ -109,6 +109,20 @@ function createAppStore() {
 
         clearError: () => {
             update(s => ({ ...s, error: null }));
+        },
+
+        revealDownload: async (appId: string) => {
+            try {
+                const result = await TauriService.revealDownloadedFile(appId);
+                notifications.add(result, 'success');
+            } catch (e) {
+                const error = getErrorMessage(e, 'Failed to show the downloaded file');
+                notifications.add(error, 'error');
+                // The backend forgets a record whose file is gone (the download
+                // folder is temporary); reload so the button reflects that.
+                const apps = await TauriService.getAllApps();
+                update(s => ({ ...s, apps }));
+            }
         }
     };
 }
