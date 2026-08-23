@@ -38,6 +38,7 @@ pub(crate) fn self_app_entry() -> App {
         install_path: None,
         last_checked: None,
         last_check_attempt: None,
+        downloaded: None,
         username: None,
         access_token: None,
     }
