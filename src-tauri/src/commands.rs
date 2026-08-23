@@ -888,7 +888,7 @@ async fn reveal_download(path: &Path) -> Result<()> {
         match result {
             Ok(()) => return Ok(()),
             Err(error) => {
-                log::warn!("Reveal attempt {attempt} of {ATTEMPTS} failed: {error}");
+                log::warn!("Reveal attempt {attempt} of {ATTEMPTS} failed: {error:?}");
                 last_error = Some(error);
                 if attempt < ATTEMPTS {
                     tokio::time::sleep(RETRY_PAUSE).await;
