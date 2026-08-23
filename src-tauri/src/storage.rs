@@ -526,7 +526,6 @@ mod tests {
         assert_eq!(mode(&existing_path), PRIVATE_DIRECTORY_MODE);
     }
 
-    #[cfg(unix)]
     #[test]
     fn forget_downloads_clears_only_the_named_apps() {
         let temp_dir = TestDir::new();
@@ -592,6 +591,7 @@ mod tests {
             .is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn startup_tightens_an_existing_apps_file_without_rewriting_it() {
         let temp_dir = TestDir::new();

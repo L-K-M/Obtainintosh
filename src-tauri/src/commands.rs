@@ -178,10 +178,12 @@ pub async fn get_all_apps(state: State<'_, AppState>) -> Result<Vec<App>, String
         .map(|app| app.id.clone())
         .collect();
     if !vanished.is_empty() {
-        state
-            .storage
-            .forget_downloads(&vanished)
-            .map_err(|e| e.to_string())?;
+        // Best-effort: failing to persist this bookkeeping must not fail the
+        // whole app-list load — the stale records are simply re-checked and
+        // re-cleared on the next successful load.
+        if let Err(e) = state.storage.forget_downloads(&vanished) {
+            log::warn!("Failed to clear vanished download records: {e}");
+        }
         for app in apps.iter_mut() {
             if vanished.contains(&app.id) {
                 app.downloaded = None;
@@ -544,11 +546,12 @@ pub async fn reveal_downloaded_file(
     // and this click. Forget the stale record so the UI offers the download
     // again, and say what happened rather than revealing a ghost.
     if !path.is_file() {
-        let mut updated = app;
-        updated.downloaded = None;
+        // Clear only this field — a full-record rewrite from the snapshot read
+        // at the start of the command would clobber the results of a check
+        // that completes concurrently.
         state
             .storage
-            .update_app(updated)
+            .forget_downloads(&[app_id])
             .map_err(|e| e.to_string())?;
         return Err(format!(
             "The downloaded file for version {} is no longer on disk — the download \
