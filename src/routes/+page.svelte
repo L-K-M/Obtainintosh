@@ -72,9 +72,7 @@
         appStore.loadApps().then(() => appStore.checkForUpdates(true));
         void loadSystemColors();
 
-        const unlistenFocus = appWindow.onFocusChanged(({payload: focused}) => {
-            windowFocused.set(focused);
-        });
+        const unlistenFocus = windowManager.subscribeActivity(windowFocused.set);
 
         const unlistenProgress = listen<DownloadProgress>('download-progress', (event) => {
             downloadProgress = event.payload.done ? null : event.payload;
@@ -145,7 +143,7 @@
         // Cleanup on unmount
         return () => {
             window.removeEventListener('keydown', onKeyDown);
-            unlistenFocus.then(fn => fn());
+            unlistenFocus();
             unlistenAddApp.then(fn => fn());
             unlistenCheckAll.then(fn => fn());
             unlistenSettings.then(fn => fn());

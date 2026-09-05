@@ -1,10 +1,45 @@
 import { currentMonitor, getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
+import type { UnlistenFn } from '@tauri-apps/api/event';
+
+const ACTIVITY_CHANGED = 'window-activity-changed';
 
 export class WindowManager {
     private static readonly TITLE_BAR_HEIGHT = 36;
     private savedWindowSize: { width: number; height: number } | null = null;
     private isShaded = false;
     private appWindow = getCurrentWindow();
+
+    subscribeActivity(onChange: (active: boolean) => void): UnlistenFn {
+        let disposed = false;
+        let receivedEvent = false;
+        let unlisten: UnlistenFn | undefined;
+
+        // Listen before reading startup state; a newer event beats that snapshot.
+        void this.appWindow.listen<boolean>(ACTIVITY_CHANGED, ({ payload }) => {
+            if (disposed) return;
+
+            receivedEvent = true;
+            onChange(payload);
+        }).then(async stop => {
+            if (disposed) {
+                stop();
+                return;
+            }
+
+            unlisten = stop;
+
+            const active = await invoke<boolean>('is_window_active');
+            if (!disposed && !receivedEvent) onChange(active);
+        }).catch(error => {
+            console.error('Failed to track window activity:', error);
+        });
+
+        return () => {
+            disposed = true;
+            unlisten?.();
+        };
+    }
 
     async close(): Promise<void> {
         try {

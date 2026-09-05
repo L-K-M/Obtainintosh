@@ -1,4 +1,4 @@
 import { writable } from 'svelte/store';
 
-// Window focus state - reactive across all components
+// Active decorations, not keyboard focus (native drags can temporarily take it).
 export const windowFocused = writable(true);
