@@ -43,7 +43,10 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 beforeEach(() => {
-    native.listeners.clear();
+    // svelteTesting() must clean up even with Vitest globals disabled.
+    expect(document.querySelector('.window-frame')).toBeNull();
+    expect(native.listeners.size).toBe(0);
+
     native.startDragging.mockClear();
     native.active = true;
     windowFocused.set(true);

@@ -30,7 +30,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
-                window_activity::track(&window)?;
+                // Decoration tracking is optional; failures must not block startup.
+                window_activity::track(&window).unwrap_or_else(|error| {
+                    log::warn!("Failed to track window activity: {error}");
+                });
             }
 
             let storage = storage::Storage::new().expect("Failed to initialize storage");
