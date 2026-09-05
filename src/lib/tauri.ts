@@ -1,5 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { App, CheckOutcome, Settings, SourceInput, SystemColors } from './types';
+import type {
+    App,
+    CheckOutcome,
+    ExportSummary,
+    ImportSummary,
+    Settings,
+    SourceInput,
+    SystemColors
+} from './types';
 
 export class TauriService {
     static async getAllApps(): Promise<App[]> {
@@ -40,5 +48,22 @@ export class TauriService {
 
     static async getSystemColors(): Promise<SystemColors> {
         return await invoke('get_system_colors');
+    }
+
+    /**
+     * Opens a native save dialog and writes the program list there. The
+     * dialog lives on the Rust side, so no file path passes through here;
+     * resolves to null when the user cancels.
+     */
+    static async exportAppList(): Promise<ExportSummary | null> {
+        return await invoke('export_app_list');
+    }
+
+    /**
+     * Opens a native open dialog and merges the chosen program list into the
+     * tracked one. Resolves to null when the user cancels.
+     */
+    static async importAppList(): Promise<ImportSummary | null> {
+        return await invoke('import_app_list');
     }
 }

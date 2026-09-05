@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { App, CheckOutcome, SourceInput } from '$lib/types';
+import type { App, CheckOutcome, ImportSummary, SourceInput } from '$lib/types';
 import { TauriService } from '$lib/tauri';
 import { getErrorMessage } from '$lib/util/errors';
 import { notifications } from './notifications';
@@ -107,6 +107,68 @@ function createAppStore() {
             }
         },
 
+        // Both of these open a native dialog on the Rust side; `loading`
+        // stays set until it closes so the toolbar cannot start a second
+        // operation underneath it.
+        exportApps: async () => {
+            update(s => ({ ...s, loading: true, error: null }));
+            try {
+                const summary = await TauriService.exportAppList();
+                update(s => ({ ...s, loading: false }));
+                if (summary) {
+                    notifications.add(
+                        `Exported ${plural(summary.count, 'program')} to ${summary.fileName}`,
+                        'success'
+                    );
+                }
+            } catch (e) {
+                const error = getErrorMessage(e, 'Failed to export the program list');
+                update(s => ({ ...s, error, loading: false }));
+                notifications.add(error, 'error');
+            }
+        },
+
+        // Resolves to whether any program was added, so the caller can decide
+        // to check the list afterwards. An import only ever adds programs;
+        // the list is re-read rather than patched because storage assigns
+        // the ids and the backend detects installed versions.
+        importApps: async (): Promise<boolean> => {
+            update(s => ({ ...s, loading: true, error: null }));
+            let summary: ImportSummary | null;
+            try {
+                summary = await TauriService.importAppList();
+            } catch (e) {
+                const error = getErrorMessage(e, 'Failed to import the program list');
+                update(s => ({ ...s, error, loading: false }));
+                notifications.add(error, 'error');
+                return false;
+            }
+            if (!summary) {
+                update(s => ({ ...s, loading: false }));
+                return false;
+            }
+
+            // From here on the import is on disk; a failure is the reload's,
+            // and must not be reported as a failed import — the summary
+            // still stands, and so does the check the caller runs next.
+            try {
+                const apps = await TauriService.getAllApps();
+                update(s => ({ ...s, apps, loading: false }));
+            } catch (e) {
+                const error = getErrorMessage(e, 'The program list could not be reloaded after the import');
+                update(s => ({ ...s, error, loading: false }));
+                notifications.add(error, 'error');
+            }
+            notifications.add(importSummaryMessage(summary), summary.added > 0 ? 'success' : 'info');
+            if (summary.missingKeys > 0) {
+                notifications.add(missingKeysMessage(summary.missingKeys), 'info');
+            }
+            if (summary.rejected.length > 0) {
+                notifications.add(rejectedEntriesMessage(summary), 'error');
+            }
+            return summary.added > 0;
+        },
+
         clearError: () => {
             update(s => ({ ...s, error: null }));
         },
@@ -140,6 +202,49 @@ function checkFailureSummary(outcomes: CheckOutcome[], incomplete: CheckOutcome[
     }
 
     return `${incomplete.length} of ${outcomes.length} update checks failed or were skipped`;
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+    return `${count} ${count === 1 ? singular : pluralForm}`;
+}
+
+/** One line saying what an import added, and what it left alone. */
+function importSummaryMessage(summary: ImportSummary): string {
+    // Re-importing a backup is the everyday case, and "Imported 0 programs"
+    // reads like a failure when it is the expected outcome.
+    const added =
+        summary.added === 0
+            ? `No programs were imported from ${summary.fileName}`
+            : `Imported ${plural(summary.added, 'program')} from ${summary.fileName}`;
+    if (summary.duplicates === 0) return added;
+    const duplicates =
+        summary.duplicates === 1
+            ? '1 was already tracked'
+            : `${summary.duplicates} were already tracked`;
+    return `${added} (${duplicates})`;
+}
+
+function missingKeysMessage(count: number): string {
+    const programs = plural(count, 'imported Forgejo program');
+    const keys = count === 1 ? 'needs its application key' : 'need their application keys';
+    const action = count === 1 ? 'Edit the program to add it.' : 'Edit each program to add its key.';
+    return `${programs} ${keys} — keys are never written to an export. ${action}`;
+}
+
+/**
+ * Names the entries an import turned away, bounded so a file full of them
+ * does not produce a notification the height of the window.
+ */
+function rejectedEntriesMessage(summary: ImportSummary): string {
+    const shown = 3;
+    const details = summary.rejected
+        .slice(0, shown)
+        .map(entry => `${entry.label}: ${entry.reason}`)
+        .join('; ');
+    const remaining = summary.rejected.length - shown;
+    const more = remaining > 0 ? `; and ${plural(remaining, 'more entry', 'more entries')}` : '';
+    const skipped = plural(summary.rejected.length, 'entry', 'entries');
+    return `${skipped} of ${summary.fileName} could not be imported — ${details}${more}`;
 }
 
 export const appStore = createAppStore();

@@ -58,6 +58,33 @@ export interface Settings {
   gitlab_token: string | null;
 }
 
+/** What an export of the program list wrote. */
+export interface ExportSummary {
+  fileName: string;
+  count: number;
+}
+
+/** An entry of an imported program list that could not be added, and why. */
+export interface RejectedEntry {
+  /** The entry's name, or its position in the file when it has none. */
+  label: string;
+  reason: string;
+}
+
+/** What an import of a program list did with the file's entries. */
+export interface ImportSummary {
+  fileName: string;
+  added: number;
+  /** Entries whose repository was tracked already, left as they were. */
+  duplicates: number;
+  rejected: RejectedEntry[];
+  /**
+   * Added Forgejo programs that came with a username but no application key:
+   * the export never writes keys, so these need theirs entered again.
+   */
+  missingKeys: number;
+}
+
 export interface Release {
   version: string;
   download_url: string;

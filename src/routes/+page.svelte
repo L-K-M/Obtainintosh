@@ -98,6 +98,14 @@
             activeModal = {type: 'about'};
         });
 
+        const unlistenImport = appWindow.listen('menu-import-apps', () => {
+            void handleImport();
+        });
+
+        const unlistenExport = appWindow.listen('menu-export-apps', () => {
+            void handleExport();
+        });
+
         // Platforms without a menu bar (Linux) keep its actions reachable as
         // keyboard shortcuts handled here. macOS menu accelerators are
         // Cmd-based and never reach the webview, so these plain Ctrl combos
@@ -130,6 +138,12 @@
                 case ',':
                     activeModal = {type: 'settings'};
                     break;
+                case 'i':
+                    void handleImport();
+                    break;
+                case 'e':
+                    void handleExport();
+                    break;
                 case 'q':
                     void handleWindowClose();
                     break;
@@ -148,6 +162,8 @@
             unlistenCheckAll.then(fn => fn());
             unlistenSettings.then(fn => fn());
             unlistenAbout.then(fn => fn());
+            unlistenImport.then(fn => fn());
+            unlistenExport.then(fn => fn());
             unlistenProgress.then(fn => fn());
             unlistenCheckProgress.then(fn => fn());
         };
@@ -205,6 +221,22 @@
 
     function handleInstall(appId: string) {
         appStore.downloadAndInstall(appId);
+    }
+
+    // The menu, the toolbar, and the keyboard all land here, so the guard
+    // against starting one of these on top of another operation (or under an
+    // open dialog) lives in one place.
+    async function handleImport() {
+        if (loading || activeModal) return;
+        const added = await appStore.importApps();
+        // Freshly imported programs have no release information yet; check
+        // them the way the launch does, quietly.
+        if (added) await appStore.checkForUpdates(true);
+    }
+
+    async function handleExport() {
+        if (loading || activeModal || apps.length === 0) return;
+        await appStore.exportApps();
     }
 
     function handleReveal(appId: string) {
@@ -290,8 +322,11 @@
         <main class="app-content">
             <Toolbar
                 {loading}
+                hasApps={apps.length > 0}
                 onaddApp={() => activeModal = {type: 'add', app: null}}
                 oncheckAll={() => appStore.checkForUpdates()}
+                onimport={() => handleImport()}
+                onexport={() => handleExport()}
                 onsettings={() => activeModal = {type: 'settings'}}
                 onabout={() => activeModal = {type: 'about'}}
             />

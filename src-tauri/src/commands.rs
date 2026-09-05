@@ -1,3 +1,4 @@
+use crate::app_list::{self, RejectedEntry};
 use crate::models::{
     bounded_check_message, App, CheckAttempt, CheckAttemptState, DownloadedRelease, Settings,
     SourceType, SystemColors,
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tauri::{Emitter, State};
+use tauri_plugin_dialog::{DialogExt, FileDialogBuilder, FilePath};
 
 pub struct AppState {
     pub storage: Arc<Storage>,
@@ -212,7 +214,7 @@ fn resolve_source_type(source_type: Option<SourceType>, url: &str) -> Result<Sou
 /// application key in the plaintext data file against a source that would
 /// never send it. Matched exhaustively on purpose: a new forge has to make
 /// this decision rather than inherit one.
-fn credentials_for(
+pub(crate) fn credentials_for(
     source_type: SourceType,
     username: Option<String>,
     access_token: Option<String>,
@@ -521,6 +523,228 @@ pub async fn update_settings(settings: Settings, state: State<'_, AppState>) -> 
 #[tauri::command]
 pub fn get_system_colors() -> Result<SystemColors, String> {
     Ok(system_colors::get_system_colors())
+}
+
+/// What an export wrote, for the confirmation message.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummary {
+    file_name: String,
+    count: usize,
+}
+
+/// What an import did with the file's entries. Everything the frontend needs
+/// to word the outcome, with the entries that were turned away named so the
+/// user can fix the file rather than guess.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    file_name: String,
+    added: usize,
+    /// Entries whose repository was tracked already, left as they were.
+    duplicates: usize,
+    rejected: Vec<RejectedEntry>,
+    /// Added Forgejo programs that came with a username but no application
+    /// key — the export never writes keys, so a private instance needs its
+    /// key entered again before its checks can succeed.
+    missing_keys: usize,
+}
+
+/// Which way a native file dialog faces.
+#[derive(Clone, Copy)]
+enum FileDialogKind {
+    Open,
+    Save,
+}
+
+/// Shows a native file dialog and resolves to the chosen path, or `None` when
+/// the user cancelled.
+///
+/// The dialog plugin runs the dialog on a thread of its own and calls back
+/// when it closes; awaiting that through a channel keeps the runtime worker
+/// free for as long as the dialog is open, where the plugin's `blocking_*`
+/// variants would park it. The dialogs are shown on the Rust side on purpose:
+/// the file is read or written only at a path the user just picked in a
+/// native dialog, and no path ever crosses the IPC boundary from the webview.
+async fn choose_file(
+    builder: FileDialogBuilder<tauri::Wry>,
+    kind: FileDialogKind,
+) -> Result<Option<PathBuf>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let deliver = move |chosen: Option<FilePath>| {
+        // The receiver is only gone if the command was dropped meanwhile,
+        // and then nobody is waiting for the answer.
+        let _ = sender.send(chosen);
+    };
+    match kind {
+        FileDialogKind::Open => builder.pick_file(deliver),
+        FileDialogKind::Save => builder.save_file(deliver),
+    }
+    let chosen = receiver
+        .await
+        .map_err(|_| "The file dialog could not be opened".to_string())?;
+    match chosen {
+        None => Ok(None),
+        Some(file) => file
+            .into_path()
+            .map(Some)
+            .map_err(|error| format!("The chosen file has no usable path: {error}")),
+    }
+}
+
+/// Exports the tracked programs to a file of the user's choosing. Resolves to
+/// `None` when the save dialog is cancelled; the list is serialized before
+/// the dialog opens so a serialization failure never asks for a path first.
+#[tauri::command]
+pub async fn export_app_list(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ExportSummary>, String> {
+    let apps = state.storage.get_all_apps().map_err(|e| e.to_string())?;
+    if apps.is_empty() {
+        return Err("There are no programs to export".to_string());
+    }
+    let contents = app_list::render(&apps).map_err(|e| e.to_string())?;
+
+    let builder = app_handle
+        .dialog()
+        .file()
+        .set_title("Export Program List")
+        .add_filter(app_list::FILE_TYPE_LABEL, &[app_list::FILE_EXTENSION])
+        .set_file_name(app_list::suggested_file_name(
+            chrono::Local::now().date_naive(),
+        ))
+        .set_can_create_directories(true);
+    let Some(chosen) = choose_file(builder, FileDialogKind::Save).await? else {
+        return Ok(None);
+    };
+
+    let path = app_list::with_default_extension(chosen.clone());
+    let written = if path == chosen {
+        // The dialog confirmed replacing this exact name.
+        tokio::fs::write(&path, contents).await
+    } else {
+        // The dialog asked about replacing the name the user typed, not the
+        // name with the extension added; a file already sitting at the
+        // latter was never agreed to be overwritten. Exclusive creation
+        // makes that check and the write one step, so nothing that appears
+        // in between — a file, a symlink — is clobbered or followed.
+        write_new_file(&path, contents.as_bytes()).await
+    };
+    written.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "A file named {} already exists there. Choose another name.",
+                app_list::display_name(&path)
+            )
+        } else {
+            format!("The program list could not be written: {error}")
+        }
+    })?;
+    log::info!("Exported {} programs to {}", apps.len(), path.display());
+
+    Ok(Some(ExportSummary {
+        file_name: app_list::display_name(&path),
+        count: apps.len(),
+    }))
+}
+
+/// Writes `contents` to a path that must not exist yet; fails with
+/// `AlreadyExists` (rather than overwriting) if it does.
+async fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?;
+    file.write_all(contents).await?;
+    file.flush().await
+}
+
+/// Imports programs from a file of the user's choosing, merging them into the
+/// tracked list. Resolves to `None` when the open dialog is cancelled.
+#[tauri::command]
+pub async fn import_app_list(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ImportSummary>, String> {
+    let builder = app_handle
+        .dialog()
+        .file()
+        .set_title("Import Program List")
+        .add_filter(app_list::FILE_TYPE_LABEL, &[app_list::FILE_EXTENSION])
+        .add_filter("JSON", &["json"]);
+    let Some(path) = choose_file(builder, FileDialogKind::Open).await? else {
+        return Ok(None);
+    };
+    let file_name = app_list::display_name(&path);
+
+    let size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| format!("{file_name} could not be read: {error}"))?
+        .len();
+    if size > app_list::MAX_FILE_SIZE {
+        return Err(format!(
+            "{file_name} is too large to be a program list (the limit is {} MB)",
+            app_list::MAX_FILE_SIZE / (1024 * 1024)
+        ));
+    }
+    let contents = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|error| format!("{file_name} could not be read: {error}"))?;
+    let entries = app_list::parse(&contents).map_err(|error| format!("{file_name}: {error}"))?;
+    let plan = app_list::plan_import(entries);
+
+    // Detect installed versions the way a batch check does, so an imported
+    // program shows what is installed as soon as it appears — and off the
+    // runtime, since the detection reads directories and may shell out.
+    // Detection is a nicety here, not a gate: the file has already been
+    // read and understood, and the quiet check that follows an import
+    // re-detects everything, so a detection failure imports the programs
+    // without versions rather than throwing the file away.
+    let detected = match detect_apps_for_check(plan.apps.clone(), true).await {
+        Ok(detected) => detected,
+        Err(error) => {
+            log::warn!("Importing without installed versions: {error}");
+            vec![(None, None); plan.apps.len()]
+        }
+    };
+    let apps: Vec<App> = plan
+        .apps
+        .into_iter()
+        .zip(detected)
+        .map(|(mut app, (current_version, install_path))| {
+            app.current_version = current_version;
+            app.install_path = install_path;
+            app
+        })
+        .collect();
+
+    // One write for the whole batch; repositories tracked already are left
+    // as they are rather than failing the import.
+    let addition = state.storage.add_apps(apps).map_err(|e| e.to_string())?;
+    let missing_keys = addition
+        .added
+        .iter()
+        .filter(|app| app_list::is_missing_application_key(app))
+        .count();
+    log::info!(
+        "Imported {} programs from {} ({} already tracked, {} rejected)",
+        addition.added.len(),
+        path.display(),
+        addition.duplicates.len(),
+        plan.rejected.len()
+    );
+
+    Ok(Some(ImportSummary {
+        file_name,
+        added: addition.added.len(),
+        duplicates: addition.duplicates.len(),
+        rejected: plan.rejected,
+        missing_keys,
+    }))
 }
 
 /// Reveals the file a completed download left in the cache — the action
