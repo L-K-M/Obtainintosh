@@ -1,3 +1,4 @@
+mod app_list;
 mod commands;
 mod installer;
 mod models;
@@ -27,6 +28,9 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // Native open/save dialogs for the program list export and import.
+        // Used from Rust only, so no capability exposes it to the webview.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let storage = storage::Storage::new().expect("Failed to initialize storage");
             app.manage(AppState {
@@ -80,6 +84,25 @@ pub fn run() {
                     ],
                 )?;
 
+                // The File menu carries the program list's export and
+                // import, which is where macOS users look for them.
+                let import_apps = MenuItem::with_id(
+                    app,
+                    "import_apps",
+                    "Import Program List...",
+                    true,
+                    Some("CmdOrCtrl+I"),
+                )?;
+                let export_apps = MenuItem::with_id(
+                    app,
+                    "export_apps",
+                    "Export Program List...",
+                    true,
+                    Some("CmdOrCtrl+E"),
+                )?;
+                let file_submenu =
+                    Submenu::with_items(app, "File", true, &[&import_apps, &export_apps])?;
+
                 // Create Edit menu for standard edit operations
                 let edit_submenu = Submenu::with_items(
                     app,
@@ -109,7 +132,10 @@ pub fn run() {
                     ],
                 )?;
 
-                let menu = Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?;
+                let menu = Menu::with_items(
+                    app,
+                    &[&app_submenu, &file_submenu, &edit_submenu, &window_submenu],
+                )?;
 
                 app.set_menu(menu)?;
             }
@@ -137,6 +163,16 @@ pub fn run() {
                     let _ = window.emit("menu-about", ());
                 }
             }
+            "import_apps" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("menu-import-apps", ());
+                }
+            }
+            "export_apps" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("menu-export-apps", ());
+                }
+            }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
@@ -149,6 +185,8 @@ pub fn run() {
             commands::reveal_downloaded_file,
             commands::get_settings,
             commands::update_settings,
+            commands::export_app_list,
+            commands::import_app_list,
             updates::check_self_update,
             updates::open_release_url,
             commands::get_system_colors,

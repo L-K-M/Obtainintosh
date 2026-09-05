@@ -1,5 +1,6 @@
 use crate::models::{App, AppData, CheckAttempt, CheckAttemptState, Settings};
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -30,6 +31,15 @@ pub enum PendingResultApplication {
     Applied,
     AppRemoved,
     DependenciesChanged,
+}
+
+/// What a batch add did with each program it was handed, in the order given:
+/// the ones now tracked (with their ids), and the ones whose repository was
+/// tracked already and were therefore left out.
+#[derive(Debug, Default)]
+pub struct BatchAddition {
+    pub added: Vec<App>,
+    pub duplicates: Vec<App>,
 }
 
 /// The fields a completed check owns. Deliberately narrow: a check has no
@@ -275,31 +285,50 @@ impl Storage {
         Ok(data.apps.iter().find(|app| app.id == id).cloned())
     }
 
-    pub fn add_app(&self, mut app: App) -> Result<App> {
-        // Generate UUID if not provided
-        if app.id.is_empty() {
-            app.id = uuid::Uuid::new_v4().to_string();
+    pub fn add_app(&self, app: App) -> Result<App> {
+        let mut addition = self.add_apps(vec![app])?;
+        match addition.added.pop() {
+            Some(app) => Ok(app),
+            None => anyhow::bail!("This repository is already being tracked"),
         }
+    }
 
-        let new_url = crate::sources::normalize_repo_url(&app.source_url);
+    /// Adds a batch of programs in one write, skipping any whose repository
+    /// is tracked already — by an existing entry or by an earlier entry of
+    /// the same batch. Skipping rather than failing is what an import wants:
+    /// a list that overlaps the current one should add the new programs, not
+    /// stop at the first familiar one. Ids are assigned to entries that
+    /// arrive without one. Nothing is written when nothing is added.
+    pub fn add_apps(&self, apps: Vec<App>) -> Result<BatchAddition> {
         let mut data = self.data.lock().unwrap();
-        if data
-            .apps
-            .iter()
-            .any(|a| crate::sources::normalize_repo_url(&a.source_url) == new_url)
-        {
-            anyhow::bail!("This repository is already being tracked");
-        }
         // Build the state we want, write it, and only then adopt it. Mutating
         // in place first would leave memory ahead of disk whenever the write
         // fails — the app would show a program it did not persist, and the
         // discrepancy would only surface on the next launch.
         let mut proposed = data.clone();
-        proposed.apps.push(app.clone());
+        let mut tracked: HashSet<String> = proposed
+            .apps
+            .iter()
+            .map(|app| crate::sources::normalize_repo_url(&app.source_url))
+            .collect();
+        let mut addition = BatchAddition::default();
+        for mut app in apps {
+            if !tracked.insert(crate::sources::normalize_repo_url(&app.source_url)) {
+                addition.duplicates.push(app);
+                continue;
+            }
+            if app.id.is_empty() {
+                app.id = uuid::Uuid::new_v4().to_string();
+            }
+            proposed.apps.push(app.clone());
+            addition.added.push(app);
+        }
 
-        self.persist(&proposed)?;
-        *data = proposed;
-        Ok(app)
+        if !addition.added.is_empty() {
+            self.persist(&proposed)?;
+            *data = proposed;
+        }
+        Ok(addition)
     }
 
     pub fn update_app(&self, updated_app: App) -> Result<()> {
@@ -785,6 +814,114 @@ mod tests {
 
         let error = storage
             .add_app(test_app("new", "https://github.com/owner/new"))
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "Failed to write temp file");
+        assert!(storage.get_all_apps().unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_add_skips_tracked_repositories_and_writes_once() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let mut data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        data.apps
+            .push(test_app("existing", "https://github.com/owner/existing"));
+        fs::write(&file_path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let storage = Storage::load_from_path(file_path.clone()).unwrap();
+
+        let addition = storage
+            .add_apps(vec![
+                // Same repository as the stored one, spelled differently.
+                test_app("", "https://GitHub.com/owner/existing.git"),
+                test_app("", "https://github.com/owner/new"),
+                // Repeated within the batch: the first occurrence wins.
+                test_app("", "https://github.com/owner/new/"),
+                test_app("", "https://github.com/owner/other"),
+            ])
+            .unwrap();
+
+        let added_urls: Vec<&str> = addition
+            .added
+            .iter()
+            .map(|app| app.source_url.as_str())
+            .collect();
+        assert_eq!(
+            added_urls,
+            [
+                "https://github.com/owner/new",
+                "https://github.com/owner/other"
+            ]
+        );
+        assert!(addition.added.iter().all(|app| !app.id.is_empty()));
+        assert_ne!(addition.added[0].id, addition.added[1].id);
+        let duplicate_urls: Vec<&str> = addition
+            .duplicates
+            .iter()
+            .map(|app| app.source_url.as_str())
+            .collect();
+        assert_eq!(
+            duplicate_urls,
+            [
+                "https://GitHub.com/owner/existing.git",
+                "https://github.com/owner/new/"
+            ]
+        );
+
+        // The additions went to disk in one go, after the existing entry.
+        let reloaded = Storage::load_from_path(file_path).unwrap();
+        let ids: Vec<String> = reloaded
+            .get_all_apps()
+            .unwrap()
+            .into_iter()
+            .map(|app| app.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "existing".to_string(),
+                addition.added[0].id.clone(),
+                addition.added[1].id.clone()
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_add_with_nothing_new_leaves_the_file_alone() {
+        let temp_dir = TestDir::new();
+        let file_path = temp_dir.path().join("apps.json");
+        let mut data = AppData {
+            self_entry_seeded: true,
+            ..AppData::default()
+        };
+        data.apps
+            .push(test_app("existing", "https://github.com/owner/existing"));
+        let original = serde_json::to_vec(&data).unwrap();
+        fs::write(&file_path, &original).unwrap();
+        let storage = Storage::load_from_path(file_path.clone()).unwrap();
+
+        let addition = storage
+            .add_apps(vec![test_app("", "https://github.com/owner/existing")])
+            .unwrap();
+
+        assert!(addition.added.is_empty());
+        assert_eq!(addition.duplicates.len(), 1);
+        assert_eq!(fs::read(&file_path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_batch_add_does_not_change_memory() {
+        let (storage, _temp_dir) = failing_storage(AppData::default());
+
+        let error = storage
+            .add_apps(vec![
+                test_app("", "https://github.com/owner/one"),
+                test_app("", "https://github.com/owner/two"),
+            ])
             .unwrap_err()
             .to_string();
 

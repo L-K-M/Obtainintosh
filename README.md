@@ -50,6 +50,29 @@ On Ubuntu (and other Debian-family distributions):
 
 Obtainintosh reads the latest published release. If a repository has no normal latest release, it can fall back to the newest non-draft release, including a prerelease.
 
+## Export and import the program list
+
+The list of tracked programs can be saved to a file and loaded from one — to back it up, to move it to another machine, or to hand it to someone else. Choose **Export…** or **Import…** on the toolbar; on macOS the same commands are under **File** (⌘E and ⌘I), and on Linux Ctrl+E and Ctrl+I do the same.
+
+The file is JSON with the extension `.obtainintosh`, for example `Obtainintosh Programs 2026-09-05.obtainintosh`:
+
+```json
+{
+  "format": "obtainintosh-app-list",
+  "format_version": 1,
+  "exported_at": "2026-09-05T12:00:00+00:00",
+  "exported_by": "Obtainintosh/1.6.2",
+  "apps": [
+    { "name": "servo", "source_type": "github", "source_url": "https://github.com/servo/servo" },
+    { "name": "Private", "source_type": "forgejo", "source_url": "https://git.example.com/owner/private", "username": "alice" }
+  ]
+}
+```
+
+An export records what identifies each program — the name, the source type, the repository URL, and the Forgejo username where there is one — and nothing Obtainintosh works out for itself (installed and latest versions, check times, cached downloads). **Application keys are never written to the file**, so it is safe to share. After importing a private Forgejo program, edit it and enter its application key again.
+
+An import merges the file into the current list: programs whose repository is already tracked are left as they are, and nothing is ever removed. Each new program's installed version is detected on import, and a quiet update check runs afterwards. Entries can be written by hand, too: `name` and `source_url` are required; `source_type` (`github` or `forgejo`) may be left out for a `github.com` or `codeberg.org` URL, and an `access_token` is honoured for a Forgejo entry. An entry that cannot be added is named in a notification; the rest of the file is still imported.
+
 ## Forgejo instances
 
 Forgejo is self-hosted, so an instance can be at any address. Obtainintosh recognises `codeberg.org` and hosts that name the software (for example `forgejo.example.org` or `gitea.example.org`) on its own. For anything else — `https://git.example.com/owner/project` — choose **Forgejo** under **Source** in the Add Program dialog, otherwise the URL is rejected as an unsupported source.
