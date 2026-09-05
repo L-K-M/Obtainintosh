@@ -273,18 +273,30 @@ pub fn suggested_file_name(today: chrono::NaiveDate) -> String {
 /// save panel appends it itself; the GTK one saves exactly what was typed. An
 /// extension the user typed deliberately (`list.json`) is left alone.
 pub fn with_default_extension(path: PathBuf) -> PathBuf {
-    if path.extension().is_some() {
+    // `extension()` is `Some("")` for a name that ends in a dot, which is
+    // no extension either.
+    if path
+        .extension()
+        .is_some_and(|extension| !extension.is_empty())
+    {
         return path;
     }
-    match path.file_name() {
-        Some(name) => {
-            let mut name = name.to_os_string();
-            name.push(".");
-            name.push(FILE_EXTENSION);
-            path.with_file_name(name)
+    let Some(name) = path.file_name() else {
+        return path;
+    };
+    let mut name = name.to_os_string();
+    // Drop that trailing dot, so `list.` becomes `list.obtainintosh`
+    // rather than `list..obtainintosh`.
+    if let Some(text) = name.to_str() {
+        let trimmed = text.trim_end_matches('.');
+        if trimmed.is_empty() {
+            return path;
         }
-        None => path,
+        name = trimmed.into();
     }
+    name.push(".");
+    name.push(FILE_EXTENSION);
+    path.with_file_name(name)
 }
 
 /// The file name shown in messages: the final component, or the whole path
@@ -652,6 +664,15 @@ mod tests {
         assert_eq!(
             with_default_extension(PathBuf::from("/tmp/list.json")),
             PathBuf::from("/tmp/list.json")
+        );
+        // A trailing dot is no extension, and is not kept either.
+        assert_eq!(
+            with_default_extension(PathBuf::from("/tmp/list.")),
+            PathBuf::from("/tmp/list.obtainintosh")
+        );
+        assert_eq!(
+            with_default_extension(PathBuf::from("/tmp/list...")),
+            PathBuf::from("/tmp/list.obtainintosh")
         );
         assert_eq!(
             with_default_extension(PathBuf::from("/")),

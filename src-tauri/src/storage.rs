@@ -313,14 +313,16 @@ impl Storage {
             .iter()
             .map(|app| crate::sources::normalize_repo_url(&app.source_url))
             .collect();
+        let mut ids: HashSet<String> = proposed.apps.iter().map(|app| app.id.clone()).collect();
         let mut addition = BatchAddition::default();
         for mut app in apps {
             if !tracked.insert(crate::sources::normalize_repo_url(&app.source_url)) {
                 addition.duplicates.push(app);
                 continue;
             }
-            if app.id.is_empty() || proposed.apps.iter().any(|existing| existing.id == app.id) {
+            if app.id.is_empty() || !ids.insert(app.id.clone()) {
                 app.id = uuid::Uuid::new_v4().to_string();
+                ids.insert(app.id.clone());
             }
             proposed.apps.push(app.clone());
             addition.added.push(app);

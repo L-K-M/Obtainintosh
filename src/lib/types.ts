@@ -61,7 +61,6 @@ export interface Settings {
 /** What an export of the program list wrote. */
 export interface ExportSummary {
   fileName: string;
-  path: string;
   count: number;
 }
 

@@ -530,7 +530,6 @@ pub fn get_system_colors() -> Result<SystemColors, String> {
 #[serde(rename_all = "camelCase")]
 pub struct ExportSummary {
     file_name: String,
-    path: String,
     count: usize,
 }
 
@@ -646,7 +645,6 @@ pub async fn export_app_list(
 
     Ok(Some(ExportSummary {
         file_name: app_list::display_name(&path),
-        path: path.display().to_string(),
         count: apps.len(),
     }))
 }
