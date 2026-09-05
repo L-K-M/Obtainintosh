@@ -298,7 +298,9 @@ impl Storage {
     /// the same batch. Skipping rather than failing is what an import wants:
     /// a list that overlaps the current one should add the new programs, not
     /// stop at the first familiar one. Ids are assigned to entries that
-    /// arrive without one. Nothing is written when nothing is added.
+    /// arrive without one, or whose id is taken already — every path that
+    /// resolves an app by id assumes ids are unique, so a colliding one is
+    /// replaced rather than let in. Nothing is written when nothing is added.
     pub fn add_apps(&self, apps: Vec<App>) -> Result<BatchAddition> {
         let mut data = self.data.lock().unwrap();
         // Build the state we want, write it, and only then adopt it. Mutating
@@ -317,7 +319,7 @@ impl Storage {
                 addition.duplicates.push(app);
                 continue;
             }
-            if app.id.is_empty() {
+            if app.id.is_empty() || proposed.apps.iter().any(|existing| existing.id == app.id) {
                 app.id = uuid::Uuid::new_v4().to_string();
             }
             proposed.apps.push(app.clone());
@@ -888,6 +890,45 @@ mod tests {
                 addition.added[1].id.clone()
             ]
         );
+    }
+
+    #[test]
+    fn batch_add_keeps_ids_unique() {
+        let mut data = AppData::default();
+        data.apps
+            .push(test_app("taken", "https://github.com/owner/existing"));
+        let temp_dir = TestDir::new();
+        let storage = Storage {
+            file_path: temp_dir.path().join("apps.json"),
+            data: Mutex::new(data),
+        };
+
+        let addition = storage
+            .add_apps(vec![
+                // Collides with the stored entry's id.
+                test_app("taken", "https://github.com/owner/one"),
+                // Collides with the entry just above, within the batch.
+                test_app("taken", "https://github.com/owner/two"),
+                // A free id is kept as given.
+                test_app("free", "https://github.com/owner/three"),
+            ])
+            .unwrap();
+
+        let mut ids: Vec<String> = storage
+            .get_all_apps()
+            .unwrap()
+            .into_iter()
+            .map(|app| app.id)
+            .collect();
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&"taken".to_string()));
+        assert!(ids.contains(&"free".to_string()));
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "ids were not unique");
+        assert_eq!(addition.added[2].id, "free");
+        assert_ne!(addition.added[0].id, "taken");
+        assert_ne!(addition.added[1].id, addition.added[0].id);
     }
 
     #[test]

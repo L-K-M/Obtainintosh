@@ -100,8 +100,8 @@ impl Header {
     /// object at all — an array, a number — is simply a document without
     /// them, and gets the same "not a program list" answer as an object that
     /// lacks them.
-    fn of(document: &serde_json::Value) -> Self {
-        serde_json::from_value(document.clone()).unwrap_or_default()
+    fn of(document: serde_json::Value) -> Self {
+        serde_json::from_value(document).unwrap_or_default()
     }
 }
 
@@ -124,9 +124,13 @@ pub fn render(apps: &[App]) -> Result<String> {
 /// Parses file contents into the entries they list, refusing anything that is
 /// not a program list this build understands.
 pub fn parse(contents: &str) -> Result<Vec<ExportedApp>> {
+    // Some editors save UTF-8 with a byte-order mark, which serde_json does
+    // not skip; a hand-edited list should not fail as "not valid JSON" over
+    // an invisible first character.
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     let document: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| anyhow::anyhow!("The file is not valid JSON: {error}"))?;
-    let header = Header::of(&document);
+    let header = Header::of(document);
     if header.format.as_deref() != Some(FORMAT) {
         anyhow::bail!("The file is not an Obtainintosh program list");
     }
@@ -440,6 +444,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_skips_a_leading_byte_order_mark() {
+        let document = r#"{"format": "obtainintosh-app-list", "format_version": 1, "apps": []}"#;
+        // Without the strip, serde_json rejects the mark as "expected value".
+        assert!(serde_json::from_str::<serde_json::Value>(&format!("\u{feff}{document}")).is_err());
+
+        assert!(parse(&format!("\u{feff}{document}")).unwrap().is_empty());
+    }
+
+    #[test]
     fn parse_accepts_minimal_hand_written_entries_and_a_supplied_key() {
         let document = r#"{
             "format": "obtainintosh-app-list",
@@ -467,6 +480,10 @@ mod tests {
         let mut github_with_stray_key = entry("Public", "https://github.com/o/public");
         github_with_stray_key.username = Some("alice".to_string());
         github_with_stray_key.access_token = Some("key".to_string());
+        let mut forgejo_with_padded_credentials =
+            entry("Padded key", "https://codeberg.org/o/padded-key");
+        forgejo_with_padded_credentials.username = Some("  bob  ".to_string());
+        forgejo_with_padded_credentials.access_token = Some("   ".to_string());
 
         let plan = plan_import(vec![
             entry("  Padded  ", "  https://github.com/o/padded  "),
@@ -476,11 +493,22 @@ mod tests {
             entry("Codeberg", "https://codeberg.org/o/detected"),
             forgejo_with_key,
             github_with_stray_key,
+            forgejo_with_padded_credentials,
         ]);
 
         let names: Vec<&str> = plan.apps.iter().map(|app| app.name.as_str()).collect();
-        assert_eq!(names, ["Padded", "Codeberg", "Private", "Public"]);
+        assert_eq!(
+            names,
+            ["Padded", "Codeberg", "Private", "Public", "Padded key"]
+        );
         assert!(plan.apps.iter().all(|app| app.id.is_empty()));
+
+        // Credentials are cleaned the way the dialog's are: trimmed, and
+        // dropped when nothing is left — so a padded username does not fail
+        // the first check with an invisible mismatch.
+        let padded_key = &plan.apps[4];
+        assert_eq!(padded_key.username.as_deref(), Some("bob"));
+        assert_eq!(padded_key.access_token, None);
 
         let padded = &plan.apps[0];
         assert_eq!(padded.source_url, "https://github.com/o/padded");

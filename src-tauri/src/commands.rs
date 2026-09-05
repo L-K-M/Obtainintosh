@@ -666,8 +666,8 @@ pub async fn import_app_list(
         .len();
     if size > app_list::MAX_FILE_SIZE {
         return Err(format!(
-            "{file_name} is too large to be a program list ({} MB)",
-            size / (1024 * 1024)
+            "{file_name} is too large to be a program list (the limit is {} MB)",
+            app_list::MAX_FILE_SIZE / (1024 * 1024)
         ));
     }
     let contents = tokio::fs::read_to_string(&path)
@@ -679,7 +679,17 @@ pub async fn import_app_list(
     // Detect installed versions the way a batch check does, so an imported
     // program shows what is installed as soon as it appears — and off the
     // runtime, since the detection reads directories and may shell out.
-    let detected = detect_apps_for_check(plan.apps.clone(), true).await?;
+    // Detection is a nicety here, not a gate: the file has already been
+    // read and understood, and the quiet check that follows an import
+    // re-detects everything, so a detection failure imports the programs
+    // without versions rather than throwing the file away.
+    let detected = match detect_apps_for_check(plan.apps.clone(), true).await {
+        Ok(detected) => detected,
+        Err(error) => {
+            log::warn!("Importing without installed versions: {error}");
+            vec![(None, None); plan.apps.len()]
+        }
+    };
     let apps: Vec<App> = plan
         .apps
         .into_iter()

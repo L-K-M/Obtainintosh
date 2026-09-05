@@ -134,28 +134,39 @@ function createAppStore() {
         // the ids and the backend detects installed versions.
         importApps: async (): Promise<boolean> => {
             update(s => ({ ...s, loading: true, error: null }));
+            let summary: ImportSummary | null;
             try {
-                const summary = await TauriService.importAppList();
-                if (!summary) {
-                    update(s => ({ ...s, loading: false }));
-                    return false;
-                }
-                const apps = await TauriService.getAllApps();
-                update(s => ({ ...s, apps, loading: false }));
-                notifications.add(importSummaryMessage(summary), summary.added > 0 ? 'success' : 'info');
-                if (summary.missingKeys > 0) {
-                    notifications.add(missingKeysMessage(summary.missingKeys), 'info');
-                }
-                if (summary.rejected.length > 0) {
-                    notifications.add(rejectedEntriesMessage(summary), 'error');
-                }
-                return summary.added > 0;
+                summary = await TauriService.importAppList();
             } catch (e) {
                 const error = getErrorMessage(e, 'Failed to import the program list');
                 update(s => ({ ...s, error, loading: false }));
                 notifications.add(error, 'error');
                 return false;
             }
+            if (!summary) {
+                update(s => ({ ...s, loading: false }));
+                return false;
+            }
+
+            // From here on the import is on disk; a failure is the reload's,
+            // and must not be reported as a failed import — the summary
+            // still stands, and so does the check the caller runs next.
+            try {
+                const apps = await TauriService.getAllApps();
+                update(s => ({ ...s, apps, loading: false }));
+            } catch (e) {
+                const error = getErrorMessage(e, 'The program list could not be reloaded after the import');
+                update(s => ({ ...s, error, loading: false }));
+                notifications.add(error, 'error');
+            }
+            notifications.add(importSummaryMessage(summary), summary.added > 0 ? 'success' : 'info');
+            if (summary.missingKeys > 0) {
+                notifications.add(missingKeysMessage(summary.missingKeys), 'info');
+            }
+            if (summary.rejected.length > 0) {
+                notifications.add(rejectedEntriesMessage(summary), 'error');
+            }
+            return summary.added > 0;
         },
 
         clearError: () => {
@@ -211,7 +222,8 @@ function importSummaryMessage(summary: ImportSummary): string {
 function missingKeysMessage(count: number): string {
     const programs = plural(count, 'imported Forgejo program');
     const keys = count === 1 ? 'needs its application key' : 'need their application keys';
-    return `${programs} ${keys} entered again — keys are never written to an export. Edit the program to add it.`;
+    const action = count === 1 ? 'Edit the program to add it.' : 'Edit each program to add its key.';
+    return `${programs} ${keys} — keys are never written to an export. ${action}`;
 }
 
 /**
