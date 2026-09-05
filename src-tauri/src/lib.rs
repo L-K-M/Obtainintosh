@@ -5,6 +5,7 @@ mod sources;
 mod storage;
 mod system_colors;
 mod updates;
+mod window_activity;
 
 use commands::AppState;
 use std::sync::Arc;
@@ -28,6 +29,10 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window_activity::track(&window)?;
+            }
+
             let storage = storage::Storage::new().expect("Failed to initialize storage");
             app.manage(AppState {
                 storage: Arc::new(storage),
@@ -152,6 +157,7 @@ pub fn run() {
             updates::check_self_update,
             updates::open_release_url,
             commands::get_system_colors,
+            window_activity::is_window_active,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
