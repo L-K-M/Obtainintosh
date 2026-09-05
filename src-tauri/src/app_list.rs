@@ -87,21 +87,29 @@ struct AppListFile {
 
 /// The lenient first pass over an import: only the marker and the version,
 /// each optional so their absence can be reported in words.
-#[derive(Default, Deserialize)]
 struct Header {
-    #[serde(default)]
     format: Option<String>,
-    #[serde(default)]
     format_version: Option<u32>,
 }
 
 impl Header {
-    /// Reads the marker fields off any JSON value. A document that is not an
-    /// object at all — an array, a number — is simply a document without
-    /// them, and gets the same "not a program list" answer as an object that
-    /// lacks them.
-    fn of(document: serde_json::Value) -> Self {
-        serde_json::from_value(document).unwrap_or_default()
+    /// Reads the marker fields off any JSON value, each on its own, so a
+    /// version written as `"1"` is reported as a version problem rather
+    /// than hiding the marker that sits next to it. A document that is not
+    /// an object at all — an array, a number — is simply a document without
+    /// either, and gets the same "not a program list" answer as an object
+    /// that lacks them.
+    fn of(document: &serde_json::Value) -> Self {
+        Self {
+            format: document
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            format_version: document
+                .get("format_version")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|version| u32::try_from(version).ok()),
+        }
     }
 }
 
@@ -130,7 +138,7 @@ pub fn parse(contents: &str) -> Result<Vec<ExportedApp>> {
     let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     let document: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| anyhow::anyhow!("The file is not valid JSON: {error}"))?;
-    let header = Header::of(document);
+    let header = Header::of(&document);
     if header.format.as_deref() != Some(FORMAT) {
         anyhow::bail!("The file is not an Obtainintosh program list");
     }
@@ -180,7 +188,7 @@ pub fn plan_import(entries: Vec<ExportedApp>) -> ImportPlan {
         let label = if name.is_empty() {
             format!("entry {}", index + 1)
         } else {
-            name.clone()
+            bounded_excerpt(&name)
         };
         match app_from_entry(name, entry) {
             Ok(app) => plan.apps.push(app),
@@ -188,6 +196,23 @@ pub fn plan_import(entries: Vec<ExportedApp>) -> ImportPlan {
         }
     }
     plan
+}
+
+/// Collapses whitespace and caps the length of a value quoted back at the
+/// user from the file — an entry's name, or its URL inside a reason. Those
+/// come straight from a file that may have been shared around, and the
+/// notification they end up in must not grow with them.
+fn bounded_excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    const ELLIPSIS: char = '…';
+
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    let mut bounded: String = normalized.chars().take(MAX_CHARS - 1).collect();
+    bounded.push(ELLIPSIS);
+    bounded
 }
 
 fn app_from_entry(name: String, entry: ExportedApp) -> Result<App, String> {
@@ -203,8 +228,9 @@ fn app_from_entry(name: String, entry: ExportedApp) -> Result<App, String> {
         .or_else(|| crate::sources::detect_source_type(&source_url))
         .ok_or_else(|| {
             format!(
-                "Unsupported source URL. Add \"source_type\": \"forgejo\" to the entry if \
-                 {source_url} is a Forgejo instance."
+                "Unsupported source URL. Add \"source_type\": \"forgejo\" to the entry if {} \
+                 is a Forgejo instance.",
+                bounded_excerpt(&source_url)
             )
         })?;
     let credentials =
@@ -410,13 +436,19 @@ mod tests {
             );
         }
 
-        let unversioned = parse(r#"{"format": "obtainintosh-app-list", "apps": []}"#)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            unversioned,
-            "The file does not say which program list format it uses"
-        );
+        // A missing version and a mistyped one are both version problems —
+        // the marker next to them is fine and must not be blamed.
+        for document in [
+            r#"{"format": "obtainintosh-app-list", "apps": []}"#,
+            r#"{"format": "obtainintosh-app-list", "format_version": "1", "apps": []}"#,
+            r#"{"format": "obtainintosh-app-list", "format_version": 1.5, "apps": []}"#,
+        ] {
+            assert_eq!(
+                parse(document).unwrap_err().to_string(),
+                "The file does not say which program list format it uses",
+                "{document}"
+            );
+        }
 
         let newer =
             parse(r#"{"format": "obtainintosh-app-list", "format_version": 2, "apps": []}"#)
@@ -544,6 +576,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn rejected_entries_quote_the_file_back_within_bounds() {
+        let long_name = format!("Name {}", "x".repeat(500));
+        let long_url = format!("https://git.example.internal/{}/repo", "o".repeat(500));
+
+        let plan = plan_import(vec![
+            entry(&long_name, "   "),
+            entry("Unknown  host\n\twith   spaces", &long_url),
+        ]);
+
+        assert_eq!(plan.rejected.len(), 2);
+        let name_label = &plan.rejected[0].label;
+        assert_eq!(name_label.chars().count(), 60, "{name_label}");
+        assert!(name_label.starts_with("Name xxx"), "{name_label}");
+        assert!(name_label.ends_with('…'), "{name_label}");
+
+        // Whitespace is collapsed so a multi-line name stays one line.
+        assert_eq!(plan.rejected[1].label, "Unknown host with spaces");
+        let reason = &plan.rejected[1].reason;
+        assert!(reason.chars().count() < 200, "{reason}");
+        assert!(
+            reason.contains("https://git.example.internal/ooo"),
+            "{reason}"
+        );
+        assert!(reason.contains("… is a Forgejo instance."), "{reason}");
     }
 
     #[test]

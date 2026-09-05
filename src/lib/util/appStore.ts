@@ -210,7 +210,12 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
 
 /** One line saying what an import added, and what it left alone. */
 function importSummaryMessage(summary: ImportSummary): string {
-    const added = `Imported ${plural(summary.added, 'program')} from ${summary.fileName}`;
+    // Re-importing a backup is the everyday case, and "Imported 0 programs"
+    // reads like a failure when it is the expected outcome.
+    const added =
+        summary.added === 0
+            ? `No programs were imported from ${summary.fileName}`
+            : `Imported ${plural(summary.added, 'program')} from ${summary.fileName}`;
     if (summary.duplicates === 0) return added;
     const duplicates =
         summary.duplicates === 1

@@ -621,18 +621,27 @@ pub async fn export_app_list(
     };
 
     let path = app_list::with_default_extension(chosen.clone());
-    // The dialog asked about replacing the name the user typed, not the name
-    // with the extension added; a file already sitting at the latter was
-    // never agreed to be overwritten.
-    if path != chosen && path.exists() {
-        return Err(format!(
-            "A file named {} already exists there. Choose another name.",
-            app_list::display_name(&path)
-        ));
-    }
-    tokio::fs::write(&path, contents)
-        .await
-        .map_err(|error| format!("The program list could not be written: {error}"))?;
+    let written = if path == chosen {
+        // The dialog confirmed replacing this exact name.
+        tokio::fs::write(&path, contents).await
+    } else {
+        // The dialog asked about replacing the name the user typed, not the
+        // name with the extension added; a file already sitting at the
+        // latter was never agreed to be overwritten. Exclusive creation
+        // makes that check and the write one step, so nothing that appears
+        // in between — a file, a symlink — is clobbered or followed.
+        write_new_file(&path, contents.as_bytes()).await
+    };
+    written.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "A file named {} already exists there. Choose another name.",
+                app_list::display_name(&path)
+            )
+        } else {
+            format!("The program list could not be written: {error}")
+        }
+    })?;
     log::info!("Exported {} programs to {}", apps.len(), path.display());
 
     Ok(Some(ExportSummary {
@@ -640,6 +649,20 @@ pub async fn export_app_list(
         path: path.display().to_string(),
         count: apps.len(),
     }))
+}
+
+/// Writes `contents` to a path that must not exist yet; fails with
+/// `AlreadyExists` (rather than overwriting) if it does.
+async fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?;
+    file.write_all(contents).await?;
+    file.flush().await
 }
 
 /// Imports programs from a file of the user's choosing, merging them into the
