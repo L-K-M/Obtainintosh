@@ -37,7 +37,7 @@ jobs:
       # Keep the workflow's guard available when re-releasing an older tag that
       # predates it, then inspect the files from the tagged commit separately.
       - name: Check out release tooling
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Validate release tag
         env:
@@ -64,7 +64,7 @@ jobs:
           fi
 
       - name: Check out tagged source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           path: release-source
@@ -176,7 +176,7 @@ jobs:
     steps:
       # Explicit ref so workflow_dispatch re-releases build the tagged commit
       # rather than the default branch. On tag pushes this matches github.ref.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
