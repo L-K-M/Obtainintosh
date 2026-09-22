@@ -1,5 +1,8 @@
 # Obtainintosh
 
+> [!IMPORTANT]
+> LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
+
 Obtainintosh is a desktop app for macOS and Linux that tracks applications distributed through GitHub or Forgejo releases. It compares releases with what is installed — `.app` bundles in `/Applications` or `~/Applications` on macOS; dpkg packages and AppImages on Linux — downloads a release asset suitable for the platform it runs on, and reveals the downloaded file in the file manager.
 
 Obtainintosh currently supports GitHub repositories and Forgejo instances, including private instances that require a username and an application key. GitLab and arbitrary download pages are not supported.
