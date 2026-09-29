@@ -40,7 +40,7 @@ On macOS:
 On Ubuntu (and other Debian-family distributions):
 
 1. Open the [latest GitHub Release](https://github.com/L-K-M/Obtainintosh/releases/latest).
-2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** install the `.flatpak` bundle (`flatpak install --user ./Obtainintosh-<version>-linux.flatpak`, GNOME runtime), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
+2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** install the `.flatpak` bundle (`flatpak install --user ./Obtainintosh-<version>-linux.flatpak`; the GNOME runtime is fetched from Flathub, so add that remote first if it is not configured), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
 
 ## Use Obtainintosh
 
