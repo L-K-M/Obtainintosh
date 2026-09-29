@@ -25,7 +25,7 @@ The release workflow builds Obtainintosh for:
 - macOS on Intel (`x86_64-apple-darwin`), as a `.dmg`
 - Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb`, an `.AppImage` and a `.flatpak`
 
-No minimum macOS version is currently documented. The Linux packages are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. Obtainintosh is not released for Windows.
+No minimum macOS version is currently documented. The `.deb` and `.AppImage` are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. The `.flatpak` runs against the GNOME runtime on any distribution with Flatpak, independent of the build host. Obtainintosh is not released for Windows.
 
 Release builds can be produced without Apple signing credentials. The workflow enables signing and notarization only when the required secrets are configured, so this repository does not guarantee that a given release asset is signed or notarized. Check the release details and verify that downloads came from this repository before bypassing any macOS security warning. The Linux packages are not signed.
 
