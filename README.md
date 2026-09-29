@@ -23,7 +23,7 @@ The release workflow builds Obtainintosh for:
 
 - macOS on Apple Silicon (`aarch64-apple-darwin`), as a `.dmg`
 - macOS on Intel (`x86_64-apple-darwin`), as a `.dmg`
-- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb` and an `.AppImage`
+- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb`, an `.AppImage` and a `.flatpak`
 
 No minimum macOS version is currently documented. The Linux packages are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. Obtainintosh is not released for Windows.
 
@@ -40,7 +40,7 @@ On macOS:
 On Ubuntu (and other Debian-family distributions):
 
 1. Open the [latest GitHub Release](https://github.com/L-K-M/Obtainintosh/releases/latest).
-2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
+2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** install the `.flatpak` bundle (`flatpak install --user ./Obtainintosh-<version>-linux.flatpak`, GNOME runtime), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
 
 ## Use Obtainintosh
 
