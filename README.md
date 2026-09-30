@@ -23,9 +23,9 @@ The release workflow builds Obtainintosh for:
 
 - macOS on Apple Silicon (`aarch64-apple-darwin`), as a `.dmg`
 - macOS on Intel (`x86_64-apple-darwin`), as a `.dmg`
-- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb` and an `.AppImage`
+- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb`, an `.AppImage` and a `.flatpak`
 
-No minimum macOS version is currently documented. The Linux packages are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. Obtainintosh is not released for Windows.
+No minimum macOS version is currently documented. The `.deb` and `.AppImage` are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. The `.flatpak` runs against the GNOME runtime on any distribution with Flatpak, independent of the build host. Obtainintosh is not released for Windows.
 
 Release builds can be produced without Apple signing credentials. The workflow enables signing and notarization only when the required secrets are configured, so this repository does not guarantee that a given release asset is signed or notarized. Check the release details and verify that downloads came from this repository before bypassing any macOS security warning. The Linux packages are not signed.
 
@@ -40,7 +40,7 @@ On macOS:
 On Ubuntu (and other Debian-family distributions):
 
 1. Open the [latest GitHub Release](https://github.com/L-K-M/Obtainintosh/releases/latest).
-2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
+2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** install the `.flatpak` bundle (`flatpak install --user ./Obtainintosh-<version>-linux.flatpak`; the GNOME runtime is fetched from Flathub, so add that remote first if it is not configured), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
 
 ## Use Obtainintosh
 

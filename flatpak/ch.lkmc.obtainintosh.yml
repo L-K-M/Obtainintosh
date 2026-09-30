@@ -1,0 +1,30 @@
+# Flatpak manifest. scripts/build-flatpak.sh extracts the release .deb into
+# dist/flatpak/stage and builds from that — the bundle ships the same files
+# the .deb installs, relaid under flatpak's /app prefix.
+id: ch.lkmc.obtainintosh
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: obtainintosh
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # WebKit's GPU rendering.
+  - --device=dri
+  # The app polls GitHub/Forgejo releases and downloads update assets.
+  - --share=network
+  # It installs AppImages into ~/Applications and reveals downloads in the
+  # file manager, so it needs that directory; document save dialogs use the
+  # portal.
+  - --filesystem=home/Applications
+  - --filesystem=home/.local/bin
+modules:
+  - name: obtainintosh
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: ../dist/flatpak/stage
+    build-commands:
+      - rm -rf DEBIAN
+      - "if [ -d usr ]; then cp -a usr/. /app/; else cp -a . /app/; fi"
