@@ -61,7 +61,9 @@
   // repository, so that a release with several can offer them as choices.
   // `lookupKey` names the inputs the shown programs belong to: a reply for
   // inputs that have changed since is dropped.
-  const PROGRAM_LOOKUP_DELAY_MS = 600;
+  // Long enough that typing a URL by hand does not spend a forge API
+  // request on every partial repository name.
+  const PROGRAM_LOOKUP_DELAY_MS = 1000;
   let releasePrograms: ReleasePrograms | null = null;
   let lookupKey = '';
   let lookupTimer: ReturnType<typeof setTimeout> | undefined;

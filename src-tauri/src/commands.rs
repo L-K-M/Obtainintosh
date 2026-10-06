@@ -322,10 +322,13 @@ pub async fn update_app(
     app.name = name;
     if app.source_url != url || app.asset_filter != asset_filter {
         // Version info from the old source is meaningless for the new one —
-        // and so is any file downloaded from it. Another program of the same
-        // repository is another source.
+        // and so is any file downloaded from it, or the outcome of its last
+        // check, which would otherwise keep showing a failure the edit may
+        // have just fixed. Another program of the same repository is another
+        // source.
         app.latest_version = None;
         app.last_checked = None;
+        app.last_check_attempt = None;
         app.downloaded = None;
         app.source_url = url;
         app.asset_filter = asset_filter;

@@ -1,5 +1,6 @@
-import { fireEvent, render, waitFor } from '@testing-library/svelte';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { fireEvent, render } from '@testing-library/svelte';
+import { tick } from 'svelte';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import AddAppDialog from './AddAppDialog.svelte';
 import type { ReleasePrograms, SourceInput } from '$lib/types';
 
@@ -15,7 +16,18 @@ const HAUNTWARE_PROGRAMS: ReleasePrograms = {
 
 beforeEach(() => {
     native.invoke.mockReset();
+    // The release lookup waits for typing to pause; fake timers let the tests
+    // end that pause on cue instead of racing it.
+    vi.useFakeTimers();
 });
+
+afterEach(() => vi.useRealTimers());
+
+/** Ends the typing pause, and lets the lookup's reply reach the page. */
+async function finishLookup() {
+    await vi.runOnlyPendingTimersAsync();
+    await tick();
+}
 
 function field(container: HTMLElement, id: string): HTMLInputElement {
     return container.querySelector(`#${id}`) as HTMLInputElement;
@@ -38,11 +50,11 @@ it('offers the programs of a multi-program release and names the entry after the
     const { container, getByText } = render(AddAppDialog, { props: { onadd } });
 
     await enterUrl(container, HAUNTWARE);
-    const choice = await waitFor(() => {
-        const select = container.querySelector('#release-program') as HTMLSelectElement;
-        expect(select).not.toBeNull();
-        return select;
-    });
+    expect(native.invoke).not.toHaveBeenCalled();
+    await finishLookup();
+
+    const choice = container.querySelector('#release-program') as HTMLSelectElement;
+    expect(choice).not.toBeNull();
     expect(getByText('Without a choice, Obtainintosh downloads planchette.')).toBeTruthy();
     expect(native.invoke).toHaveBeenCalledWith('list_release_programs', {
         input: expect.objectContaining({ url: HAUNTWARE, sourceType: null })
@@ -72,9 +84,8 @@ it('keeps a typed program when the release lookup fails', async () => {
     const { container } = render(AddAppDialog, { props: { onadd } });
 
     await enterUrl(container, HAUNTWARE);
-    await waitFor(() =>
-        expect(native.invoke).toHaveBeenCalledWith('list_release_programs', expect.anything())
-    );
+    await finishLookup();
+    expect(native.invoke).toHaveBeenCalledWith('list_release_programs', expect.anything());
     await fireEvent.input(field(container, 'asset-filter'), { target: { value: ' Seance ' } });
     await fireEvent.click(addButton(container));
 
@@ -93,10 +104,28 @@ it('offers no choice for a release with a single program', async () => {
     const { container } = render(AddAppDialog, { props: {} });
 
     await enterUrl(container, 'https://github.com/owner/tool');
-    await waitFor(() =>
-        expect(native.invoke).toHaveBeenCalledWith('list_release_programs', expect.anything())
-    );
+    await finishLookup();
+    expect(native.invoke).toHaveBeenCalledWith('list_release_programs', expect.anything());
 
     expect(container.querySelector('#release-program')).toBeNull();
     expect(field(container, 'name').value).toBe('tool');
+});
+
+it('drops the reply of a lookup whose URL has since changed', async () => {
+    let answer: (programs: ReleasePrograms) => void = () => {};
+    native.invoke.mockImplementation((command: string) =>
+        command === 'list_release_programs'
+            ? new Promise<ReleasePrograms>(resolve => { answer = resolve; })
+            : Promise.resolve(null)
+    );
+    const { container } = render(AddAppDialog, { props: {} });
+
+    await enterUrl(container, HAUNTWARE);
+    await finishLookup();
+    await enterUrl(container, 'https://github.com/owner/tool');
+    answer(HAUNTWARE_PROGRAMS);
+    // Also starts the lookup for the new URL, which never answers.
+    await finishLookup();
+
+    expect(container.querySelector('#release-program')).toBeNull();
 });
