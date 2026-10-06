@@ -33,6 +33,7 @@ pub(crate) fn self_app_entry() -> App {
         name: REPO.to_string(),
         source_type: SourceType::GitHub,
         source_url: self_repo_url(),
+        asset_filter: None,
         current_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         latest_version: None,
         install_path: None,

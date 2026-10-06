@@ -1,12 +1,13 @@
 use crate::app_list::{self, RejectedEntry};
 use crate::models::{
-    bounded_check_message, App, CheckAttempt, CheckAttemptState, DownloadedRelease, Settings,
-    SourceType, SystemColors,
+    bounded_check_message, App, CheckAttempt, CheckAttemptState, DownloadedRelease,
+    ReleasePrograms, Settings, SourceType, SystemColors,
 };
-use crate::sources::{DownloadAuth, ForgeCredentials, ForgejoAdapter, GitHubAdapter};
+use crate::sources::{AssetFilter, DownloadAuth, ForgeCredentials, ForgejoAdapter, GitHubAdapter};
 use crate::storage::{CheckOwnedUpdate, PendingResultApplication, Storage};
 use crate::system_colors;
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -225,17 +226,43 @@ pub(crate) fn credentials_for(
     }
 }
 
-#[tauri::command]
-pub async fn add_app(
+/// The program an entry tracks, read back from its stored canonical form.
+/// That always parses unless the data file was edited by hand, and then the
+/// check reports it rather than quietly tracking another program.
+fn stored_asset_filter(app: &App) -> Result<Option<AssetFilter>> {
+    AssetFilter::parse(app.asset_filter.as_deref().unwrap_or(""))
+        .map_err(|error| anyhow::anyhow!("The stored program filter is invalid: {error}"))
+}
+
+/// What the Add/Edit Program dialog sends about a program: `SourceInput` in
+/// the frontend. `Debug` is deliberately not derived — it carries an
+/// application key.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceInput {
     url: String,
     name: String,
+    /// `None` leaves the forge to be detected from the URL.
     source_type: Option<SourceType>,
     username: Option<String>,
     access_token: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<App, String> {
+    /// The program of a multi-program release, as typed; blank for none.
+    asset_filter: Option<String>,
+}
+
+#[tauri::command]
+pub async fn add_app(input: SourceInput, state: State<'_, AppState>) -> Result<App, String> {
+    let SourceInput {
+        url,
+        name,
+        source_type,
+        username,
+        access_token,
+        asset_filter,
+    } = input;
     let source_type = resolve_source_type(source_type, &url)?;
     let credentials = credentials_for(source_type, username, access_token);
+    let asset_filter = AssetFilter::canonicalize(asset_filter.as_deref().unwrap_or(""))?;
 
     // Check if app is already installed. Off the async runtime like every
     // other detection call: it reads directories and, on Linux, shells out to
@@ -247,6 +274,7 @@ pub async fn add_app(
         name,
         source_type,
         source_url: url,
+        asset_filter,
         current_version,
         latest_version: None,
         install_path,
@@ -257,8 +285,8 @@ pub async fn add_app(
         access_token: credentials.token().map(str::to_string),
     };
 
-    // Storage assigns the UUID, rejects duplicate source URLs, and returns
-    // the stored record
+    // Storage assigns the UUID, rejects a repository and program tracked
+    // already, and returns the stored record
     state.storage.add_app(app).map_err(|e| e.to_string())
 }
 
@@ -270,13 +298,19 @@ pub async fn remove_app(id: String, state: State<'_, AppState>) -> Result<(), St
 #[tauri::command]
 pub async fn update_app(
     id: String,
-    url: String,
-    name: String,
-    source_type: Option<SourceType>,
-    username: Option<String>,
-    access_token: Option<String>,
+    input: SourceInput,
     state: State<'_, AppState>,
 ) -> Result<App, String> {
+    let SourceInput {
+        url,
+        name,
+        source_type,
+        username,
+        access_token,
+        asset_filter,
+    } = input;
+    let asset_filter = AssetFilter::canonicalize(asset_filter.as_deref().unwrap_or(""))?;
+
     // Get existing app
     let mut app = state
         .storage
@@ -286,13 +320,15 @@ pub async fn update_app(
 
     // Update fields
     app.name = name;
-    if app.source_url != url {
+    if app.source_url != url || app.asset_filter != asset_filter {
         // Version info from the old source is meaningless for the new one —
-        // and so is any file downloaded from it.
+        // and so is any file downloaded from it. Another program of the same
+        // repository is another source.
         app.latest_version = None;
         app.last_checked = None;
         app.downloaded = None;
         app.source_url = url;
+        app.asset_filter = asset_filter;
     }
 
     // The dialog sends the source type it displayed; fall back to detection so
@@ -312,6 +348,40 @@ pub async fn update_app(
         .map_err(|e| e.to_string())?;
 
     Ok(app)
+}
+
+/// The programs the latest release of a repository offers this platform, for
+/// the Add Program dialog to offer when there are several. Takes the dialog's
+/// fields rather than an entry, because the program is not tracked yet; the
+/// name and filter are not needed for the lookup.
+#[tauri::command]
+pub async fn list_release_programs(
+    input: SourceInput,
+    state: State<'_, AppState>,
+) -> Result<ReleasePrograms, String> {
+    let SourceInput {
+        url,
+        source_type,
+        username,
+        access_token,
+        ..
+    } = input;
+    let source_type = resolve_source_type(source_type, &url)?;
+    let programs = match source_type {
+        SourceType::GitHub => {
+            let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+            GitHubAdapter::new(settings.github_token)
+                .get_release_programs(&url)
+                .await
+        }
+        SourceType::Forgejo => {
+            ForgejoAdapter::new(credentials_for(source_type, username, access_token))
+                .get_release_programs(&url)
+                .await
+        }
+        SourceType::GitLab => return Err("GitLab support not yet implemented".to_string()),
+    };
+    programs.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -381,17 +451,25 @@ pub async fn check_for_updates(
             let finished = Arc::clone(&finished);
             let names = Arc::clone(&names);
             async move {
-                let result = match app.source_type {
-                    SourceType::GitHub => adapter.get_latest_release(&app.source_url).await,
-                    SourceType::Forgejo => {
-                        ForgejoAdapter::new(forge_credentials(&app))
-                            .get_latest_release(&app.source_url)
-                            .await
+                let result = async {
+                    let filter = stored_asset_filter(&app)?;
+                    match app.source_type {
+                        SourceType::GitHub => {
+                            adapter
+                                .get_latest_release(&app.source_url, filter.as_ref())
+                                .await
+                        }
+                        SourceType::Forgejo => {
+                            ForgejoAdapter::new(forge_credentials(&app))
+                                .get_latest_release(&app.source_url, filter.as_ref())
+                                .await
+                        }
+                        SourceType::GitLab => {
+                            Err(anyhow::anyhow!("GitLab support not yet implemented"))
+                        }
                     }
-                    SourceType::GitLab => {
-                        Err(anyhow::anyhow!("GitLab support not yet implemented"))
-                    }
-                };
+                }
+                .await;
 
                 // Report against the count actually finished, so the dialog's
                 // `position - 1` still means "this many are done" with several
@@ -818,11 +896,12 @@ pub async fn download_and_install(
     // authenticate with (a private Forgejo repository serves its assets behind
     // the same credentials the API call used).
     log::info!("Fetching release info for {}", app.name);
+    let filter = stored_asset_filter(&app).map_err(|e| e.to_string())?;
     let (release, download_auth) = match app.source_type {
         SourceType::GitHub => {
             let adapter = GitHubAdapter::new(settings.github_token);
             let release = adapter
-                .get_latest_release(&app.source_url)
+                .get_latest_release(&app.source_url, filter.as_ref())
                 .await
                 .map_err(|e| e.to_string())?;
             (release, None)
@@ -830,7 +909,7 @@ pub async fn download_and_install(
         SourceType::Forgejo => {
             let adapter = ForgejoAdapter::new(forge_credentials(&app));
             let release = adapter
-                .get_latest_release(&app.source_url)
+                .get_latest_release(&app.source_url, filter.as_ref())
                 .await
                 .map_err(|e| e.to_string())?;
             let auth = adapter

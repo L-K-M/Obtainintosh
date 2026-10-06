@@ -1,6 +1,12 @@
-use crate::models::{Release, SourceType};
+use crate::models::{Release, ReleasePrograms, SourceType};
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::BTreeSet;
+
+mod asset_filter;
+
+use asset_filter::program_name;
+pub use asset_filter::AssetFilter;
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
@@ -51,7 +57,7 @@ pub fn http_client() -> &'static reqwest::Client {
 /// Gitea-compatible and names these fields exactly like GitHub's, so one type
 /// deserializes both and the asset picker below can stay shared. Fields the
 /// two disagree on are simply ignored by serde.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ForgeRelease {
     tag_name: String,
     body: Option<String>,
@@ -66,7 +72,11 @@ struct ForgeRelease {
 /// can install. Matches the page size both forges are asked for.
 const RECENT_RELEASE_LIMIT: usize = 10;
 
-#[derive(Debug, Deserialize)]
+/// How many programs an error message names before summarising the rest, so
+/// it fits the bounded check message.
+const MAX_LISTED_PROGRAMS: usize = 5;
+
+#[derive(Debug, Clone, Deserialize)]
 struct ReleaseAsset {
     name: String,
     browser_download_url: String,
@@ -75,9 +85,9 @@ struct ReleaseAsset {
 
 impl ForgeRelease {
     /// Turns the forge's release into ours, picking the asset this machine can
-    /// use.
-    fn build_release(&self) -> Result<Release> {
-        let asset = find_compatible_asset(&self.assets).with_context(|| {
+    /// use — of the filtered program, when there is a filter.
+    fn build_release(&self, filter: Option<&AssetFilter>) -> Result<Release> {
+        let asset = find_compatible_asset(&self.assets, filter).with_context(|| {
             format!("Selected release has no {PLATFORM_LABEL}-compatible asset")
         })?;
 
@@ -91,8 +101,33 @@ impl ForgeRelease {
         })
     }
 
-    fn has_compatible_asset(&self) -> bool {
-        find_compatible_asset(&self.assets).is_some()
+    fn has_compatible_asset(&self, filter: Option<&AssetFilter>) -> bool {
+        find_compatible_asset(&self.assets, filter).is_some()
+    }
+
+    /// The programs this release offers this platform, and the one an entry
+    /// without a filter gets.
+    fn programs(&self) -> ReleasePrograms {
+        ReleasePrograms {
+            version: clean_version_tag(&self.tag_name),
+            programs: self.platform_programs(),
+            default_program: find_compatible_asset(&self.assets, None)
+                .and_then(|asset| program_name(&asset.name)),
+        }
+    }
+
+    /// The names of the programs with an asset this platform can install,
+    /// sorted: `["planchette", "poltergeist", "seance"]`.
+    fn platform_programs(&self) -> Vec<String> {
+        let names: BTreeSet<String> = self
+            .assets
+            .iter()
+            .filter_map(|asset| program_name(&asset.name))
+            .collect();
+        names
+            .into_iter()
+            .filter(|name| self.has_compatible_asset(Some(&AssetFilter::Program(name.clone()))))
+            .collect()
     }
 }
 
@@ -119,10 +154,11 @@ fn has_published_release(releases: &[ForgeRelease]) -> bool {
 /// whose only stable releases are still drafts, or a forge that is simply
 /// inconsistent about the flag. So the search widens to the newest published
 /// release of any channel that carries an installable asset.
-fn select_recent_release(
-    releases: &[ForgeRelease],
+fn select_recent_release<'a>(
+    releases: &'a [ForgeRelease],
     stable_release_published: bool,
-) -> Result<&ForgeRelease> {
+    filter: Option<&AssetFilter>,
+) -> Result<&'a ForgeRelease> {
     // A list with nothing published in it gets its own message — but only
     // when the list is the sole evidence. When `releases/latest` answered,
     // a published release exists by definition (perhaps just outside the
@@ -145,35 +181,75 @@ fn select_recent_release(
         );
     }
 
-    if stable_release_published {
-        return find_compatible_release(releases, Some(false)).with_context(|| {
-            format!(
-                "No {}-compatible stable release found in the {} most recent releases",
-                PLATFORM_LABEL, RECENT_RELEASE_LIMIT
-            )
-        });
-    }
+    let channel = stable_release_published.then_some(false);
+    find_compatible_release(releases, channel, filter)
+        .with_context(|| no_compatible_release_message(releases, channel, filter))
+}
 
-    find_compatible_release(releases, None).with_context(|| {
-        format!(
-            "No {}-compatible release found in the {} most recent releases",
-            PLATFORM_LABEL, RECENT_RELEASE_LIMIT
-        )
-    })
+/// Why no release qualified. With a filter, it names the program and lists
+/// what the newest release of the channel offers this platform instead, so a
+/// misspelt program can be corrected from the message alone:
+/// `… release of "seanse" found in the 10 most recent releases. The newest
+/// offers: planchette, poltergeist, seance`.
+fn no_compatible_release_message(
+    releases: &[ForgeRelease],
+    prerelease: Option<bool>,
+    filter: Option<&AssetFilter>,
+) -> String {
+    let channel = if prerelease == Some(false) {
+        "stable "
+    } else {
+        ""
+    };
+    let Some(filter) = filter else {
+        return format!(
+            "No {PLATFORM_LABEL}-compatible {channel}release found in the \
+             {RECENT_RELEASE_LIMIT} most recent releases"
+        );
+    };
+
+    let mut message = format!(
+        "No {PLATFORM_LABEL}-compatible {channel}release of \"{}\" found in the \
+         {RECENT_RELEASE_LIMIT} most recent releases",
+        filter.canonical()
+    );
+    let newest = releases
+        .iter()
+        .find(|release| !release.draft && in_channel(release, prerelease));
+    let programs = newest
+        .map(ForgeRelease::platform_programs)
+        .unwrap_or_default();
+    if !programs.is_empty() {
+        message.push_str(". The newest offers: ");
+        message.push_str(&list_programs(&programs));
+    }
+    message
+}
+
+/// `a, b, c` — or, past `MAX_LISTED_PROGRAMS`, `a, b, c, d, e and 2 more`.
+fn list_programs(programs: &[String]) -> String {
+    let listed = programs[..programs.len().min(MAX_LISTED_PROGRAMS)].join(", ");
+    match programs.len().saturating_sub(MAX_LISTED_PROGRAMS) {
+        0 => listed,
+        remaining => format!("{listed} and {remaining} more"),
+    }
+}
+
+fn in_channel(release: &ForgeRelease, prerelease: Option<bool>) -> bool {
+    prerelease.is_none_or(|wanted| release.prerelease == wanted)
 }
 
 /// The newest published release carrying an asset this machine can use,
 /// optionally restricted to one channel. Drafts are unpublished and never
 /// count. The list arrives newest-first from both forges, so the first match
 /// is the newest.
-fn find_compatible_release(
-    releases: &[ForgeRelease],
+fn find_compatible_release<'a>(
+    releases: &'a [ForgeRelease],
     prerelease: Option<bool>,
-) -> Option<&ForgeRelease> {
+    filter: Option<&AssetFilter>,
+) -> Option<&'a ForgeRelease> {
     releases.iter().find(|release| {
-        !release.draft
-            && prerelease.is_none_or(|wanted| release.prerelease == wanted)
-            && release.has_compatible_asset()
+        !release.draft && in_channel(release, prerelease) && release.has_compatible_asset(filter)
     })
 }
 
@@ -261,7 +337,29 @@ impl GitHubAdapter {
         request
     }
 
-    pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
+    /// The release to install the filtered program from, or the repository's
+    /// only program when there is no filter.
+    pub async fn get_latest_release(
+        &self,
+        repo_url: &str,
+        filter: Option<&AssetFilter>,
+    ) -> Result<Release> {
+        self.resolve_release(repo_url, filter)
+            .await?
+            .build_release(filter)
+    }
+
+    /// The programs the release an unfiltered entry would install offers
+    /// this platform.
+    pub async fn get_release_programs(&self, repo_url: &str) -> Result<ReleasePrograms> {
+        Ok(self.resolve_release(repo_url, None).await?.programs())
+    }
+
+    async fn resolve_release(
+        &self,
+        repo_url: &str,
+        filter: Option<&AssetFilter>,
+    ) -> Result<ForgeRelease> {
         let (owner, repo) = Self::parse_github_url(repo_url)?;
 
         let api_url = format!(
@@ -295,14 +393,13 @@ impl GitHubAdapter {
         // release, or one built for other platforms only, would otherwise make
         // the app report no compatible asset at all, even with a perfectly
         // good build one release back.
-        if let Some(release) = latest.as_ref() {
-            if release.has_compatible_asset() {
-                return release.build_release();
-            }
+        let stable_release_published = latest.is_some();
+        if let Some(release) = latest.filter(|release| release.has_compatible_asset(filter)) {
+            return Ok(release);
         }
 
         let releases = self.get_recent_releases(&owner, &repo).await?;
-        select_recent_release(&releases, latest.is_some())?.build_release()
+        select_recent_release(&releases, stable_release_published, filter).cloned()
     }
 
     async fn get_recent_releases(&self, owner: &str, repo: &str) -> Result<Vec<ForgeRelease>> {
@@ -381,7 +478,29 @@ impl ForgejoAdapter {
         )
     }
 
-    pub async fn get_latest_release(&self, repo_url: &str) -> Result<Release> {
+    /// The release to install the filtered program from, or the repository's
+    /// only program when there is no filter.
+    pub async fn get_latest_release(
+        &self,
+        repo_url: &str,
+        filter: Option<&AssetFilter>,
+    ) -> Result<Release> {
+        self.resolve_release(repo_url, filter)
+            .await?
+            .build_release(filter)
+    }
+
+    /// The programs the release an unfiltered entry would install offers
+    /// this platform.
+    pub async fn get_release_programs(&self, repo_url: &str) -> Result<ReleasePrograms> {
+        Ok(self.resolve_release(repo_url, None).await?.programs())
+    }
+
+    async fn resolve_release(
+        &self,
+        repo_url: &str,
+        filter: Option<&AssetFilter>,
+    ) -> Result<ForgeRelease> {
         let (base_url, owner, repo) = parse_forgejo_url(repo_url)?;
         let releases_url = format!("{}/api/v1/repos/{}/{}/releases", base_url, owner, repo);
 
@@ -409,14 +528,13 @@ impl ForgejoAdapter {
             )
         };
 
-        if let Some(release) = latest.as_ref() {
-            if release.has_compatible_asset() {
-                return release.build_release();
-            }
+        let stable_release_published = latest.is_some();
+        if let Some(release) = latest.filter(|release| release.has_compatible_asset(filter)) {
+            return Ok(release);
         }
 
         let releases = self.get_recent_releases(&releases_url).await?;
-        select_recent_release(&releases, latest.is_some())?.build_release()
+        select_recent_release(&releases, stable_release_published, filter).cloned()
     }
 
     async fn get_recent_releases(&self, releases_url: &str) -> Result<Vec<ForgeRelease>> {
@@ -660,22 +778,31 @@ fn same_origin(a: &str, b: &str) -> bool {
 }
 
 /// The release asset the platform this build runs on can install, if any.
+/// A filter narrows the candidates to one program before the picker ranks
+/// them, so its platform preferences still apply within that program.
 ///
 /// Dispatches with `cfg!` rather than `#[cfg]` so both platform pickers are
 /// compiled — and their tests run — everywhere; the unused one is eliminated
 /// as dead code in release builds.
-fn find_compatible_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
+fn find_compatible_asset<'a>(
+    assets: &'a [ReleaseAsset],
+    filter: Option<&AssetFilter>,
+) -> Option<&'a ReleaseAsset> {
+    let candidates = assets
+        .iter()
+        .filter(|asset| filter.is_none_or(|filter| filter.matches(&asset.name)));
     if cfg!(target_os = "macos") {
-        find_macos_asset_for_arch(assets, target_cpu_arch())
+        find_macos_asset_for_arch(candidates, target_cpu_arch())
     } else {
-        find_linux_asset_for_arch(assets, target_cpu_arch())
+        find_linux_asset_for_arch(candidates, target_cpu_arch())
     }
 }
 
-fn find_macos_asset_for_arch(
-    assets: &[ReleaseAsset],
+fn find_macos_asset_for_arch<'a>(
+    assets: impl IntoIterator<Item = &'a ReleaseAsset>,
     target_arch: CpuArch,
-) -> Option<&ReleaseAsset> {
+) -> Option<&'a ReleaseAsset> {
+    let assets: Vec<&ReleaseAsset> = assets.into_iter().collect();
     log::debug!("Finding macOS asset from {} candidates", assets.len());
     let extensions = [".dmg", ".pkg", ".app.tar.gz", ".tar.gz", ".zip"];
     let macos_markers = ["mac", "macos", "macosx", "darwin", "osx"];
@@ -685,7 +812,7 @@ fn find_macos_asset_for_arch(
     ];
 
     let selected = assets
-        .iter()
+        .into_iter()
         .filter_map(|asset| {
             let name = asset.name.to_ascii_lowercase();
             let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
@@ -778,10 +905,11 @@ fn find_macos_asset_for_arch(
 /// Unlike macOS there is no universal binary and no Rosetta: an asset marked
 /// for the other CPU is never usable, so it is rejected outright, and an
 /// unmarked asset ranks below one that names the native architecture.
-fn find_linux_asset_for_arch(
-    assets: &[ReleaseAsset],
+fn find_linux_asset_for_arch<'a>(
+    assets: impl IntoIterator<Item = &'a ReleaseAsset>,
     target_arch: CpuArch,
-) -> Option<&ReleaseAsset> {
+) -> Option<&'a ReleaseAsset> {
+    let assets: Vec<&ReleaseAsset> = assets.into_iter().collect();
     log::debug!("Finding Linux asset from {} candidates", assets.len());
     let extensions = [".deb", ".appimage", ".tar.gz", ".zip"];
     // "linux32" is deliberately not a valid marker: it names a 32-bit x86
@@ -797,7 +925,7 @@ fn find_linux_asset_for_arch(
     const FIRST_GENERIC_ARCHIVE_RANK: usize = 2;
 
     let selected = assets
-        .iter()
+        .into_iter()
         .filter_map(|asset| {
             let name = asset.name.to_ascii_lowercase();
             let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
@@ -1376,7 +1504,7 @@ mod tests {
         }"#;
 
         let release: ForgeRelease = serde_json::from_str(payload).unwrap();
-        let release = release.build_release().unwrap();
+        let release = release.build_release(None).unwrap();
         assert_eq!(release.version, "2.1.0");
         assert_eq!(release.file_name, compatible_asset_name("App"));
         assert_eq!(release.file_size, Some(4096));
@@ -1495,7 +1623,7 @@ mod tests {
             Some("key123".to_string()),
         ));
         let release = adapter
-            .get_latest_release(&format!("{}/owner/repo", address))
+            .get_latest_release(&format!("{}/owner/repo", address), None)
             .await
             .unwrap();
 
@@ -1536,7 +1664,7 @@ mod tests {
 
         let adapter = ForgejoAdapter::new(ForgeCredentials::default());
         let release = adapter
-            .get_latest_release(&format!("{}/owner/repo", address))
+            .get_latest_release(&format!("{}/owner/repo", address), None)
             .await
             .unwrap();
 
@@ -1561,7 +1689,7 @@ mod tests {
 
         let adapter = ForgejoAdapter::new(ForgeCredentials::default());
         let error = adapter
-            .get_latest_release(&format!("{}/owner/repo", address))
+            .get_latest_release(&format!("{}/owner/repo", address), None)
             .await
             .unwrap_err()
             .to_string();
@@ -1581,7 +1709,7 @@ mod tests {
             Some("wrong".to_string()),
         ));
         let error = adapter
-            .get_latest_release(&format!("{}/owner/repo", address))
+            .get_latest_release(&format!("{}/owner/repo", address), None)
             .await
             .unwrap_err()
             .to_string();
@@ -1672,7 +1800,7 @@ mod tests {
         } else {
             find_linux_asset_for_arch(&assets, target_cpu_arch()).unwrap()
         };
-        let selected = find_compatible_asset(&assets).unwrap();
+        let selected = find_compatible_asset(&assets, None).unwrap();
         assert_eq!(selected.name, expected.name);
     }
 
@@ -2017,17 +2145,17 @@ mod tests {
             "../test-data/github/latest-missing-compatible-asset.json"
         ));
         assert!(
-            !latest.has_compatible_asset(),
+            !latest.has_compatible_asset(None),
             "fixture should lack a compatible asset"
         );
 
         let releases = parse_releases(include_str!("../test-data/github/older-stable-valid.json"));
-        let selected = select_recent_release(&releases, true).unwrap();
+        let selected = select_recent_release(&releases, true, None).unwrap();
 
         // The newer prerelease is skipped: the repository publishes stable
         // releases, so the user is tracking the stable channel.
         assert_eq!(selected.tag_name, "v1.9.0");
-        assert_eq!(selected.build_release().unwrap().version, "1.9.0");
+        assert_eq!(selected.build_release(None).unwrap().version, "1.9.0");
     }
 
     #[test]
@@ -2035,7 +2163,7 @@ mod tests {
         let releases = parse_releases(include_str!("../test-data/github/prerelease-only.json"));
 
         // stable_release_published = false: `releases/latest` 404d.
-        let selected = select_recent_release(&releases, false).unwrap();
+        let selected = select_recent_release(&releases, false, None).unwrap();
 
         assert_eq!(selected.tag_name, "v4.0.0-beta.1");
     }
@@ -2044,7 +2172,7 @@ mod tests {
     fn drafts_are_never_selected() {
         let releases = parse_releases(include_str!("../test-data/github/draft-exclusion.json"));
 
-        let selected = select_recent_release(&releases, true).unwrap();
+        let selected = select_recent_release(&releases, true, None).unwrap();
 
         assert_eq!(selected.tag_name, "v2.9.0", "a draft was selected");
     }
@@ -2058,7 +2186,7 @@ mod tests {
         // A compatible prerelease exists, but the repository publishes stable
         // releases, so switching the user onto it would change the channel
         // they track without saying so.
-        let error = select_recent_release(&releases, true)
+        let error = select_recent_release(&releases, true, None)
             .unwrap_err()
             .to_string();
 
@@ -2070,7 +2198,7 @@ mod tests {
         );
         // The prerelease is there and installable — it is withheld on purpose,
         // not missed.
-        assert!(find_compatible_release(&releases, Some(true)).is_some());
+        assert!(find_compatible_release(&releases, Some(true), None).is_some());
     }
 
     #[test]
@@ -2084,7 +2212,7 @@ mod tests {
             "../test-data/github/no-compatible-stable-release.json"
         ));
 
-        let selected = select_recent_release(&releases, false).unwrap();
+        let selected = select_recent_release(&releases, false, None).unwrap();
 
         assert_eq!(selected.tag_name, "v5.1.0-beta.1");
     }
@@ -2094,7 +2222,9 @@ mod tests {
         // `releases/latest` 404s and the list comes back empty: the repository
         // has published nothing at all, which is a different problem than
         // ten releases that all miss this platform.
-        let error = select_recent_release(&[], false).unwrap_err().to_string();
+        let error = select_recent_release(&[], false, None)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("No published releases"), "{error}");
         assert!(error.contains("draft"), "{error}");
@@ -2120,7 +2250,7 @@ mod tests {
             .collect();
         assert!(releases.iter().all(|release| release.draft));
 
-        let error = select_recent_release(&releases, false)
+        let error = select_recent_release(&releases, false, None)
             .unwrap_err()
             .to_string();
 
@@ -2146,11 +2276,207 @@ mod tests {
             .collect();
         assert!(releases.iter().all(|release| release.draft));
 
-        let error = select_recent_release(&releases, true)
+        let error = select_recent_release(&releases, true, None)
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("stable"), "{error}");
         assert!(!error.contains("No published releases"), "{error}");
+    }
+
+    /// Hauntware 1.9.0: four programs in one release, for every platform.
+    const HAUNTWARE_ASSETS: &[&str] = &[
+        "planchette-linux-x64.AppImage",
+        "planchette-linux-x64.flatpak",
+        "planchette-linux-x64.tar.gz",
+        "planchette-macos-universal.zip",
+        "planchette-windows-x64.zip",
+        "planchette_1.9.0-1_amd64.deb",
+        "poltergeist-android.apk",
+        "poltergeist-ios-unsigned.ipa",
+        "poltergeist-linux-x64.AppImage",
+        "poltergeist-macos-universal.zip",
+        "poltergeist-windows-x64.zip",
+        "poltergeist_1.9.0-1_amd64.deb",
+        "seance-linux-x64.AppImage",
+        "seance-linux-x64.tar.gz",
+        "seance-macos-universal.zip",
+        "seance-sync-linux-x64.tar.gz",
+        "seance-sync-macos-arm64.tar.gz",
+        "seance-sync-windows-x64.tar.gz",
+        "seance-windows-x64.zip",
+        "seance_1.9.0-1_amd64.deb",
+        "SHA256SUMS",
+    ];
+
+    fn program_filter(name: &str) -> AssetFilter {
+        AssetFilter::parse(name).unwrap().unwrap()
+    }
+
+    fn release(tag: &str, prerelease: bool, assets: &[&str]) -> ForgeRelease {
+        ForgeRelease {
+            tag_name: tag.to_string(),
+            body: None,
+            assets: assets.iter().map(|name| asset(name)).collect(),
+            draft: false,
+            prerelease,
+        }
+    }
+
+    #[test]
+    fn each_program_of_a_multi_program_release_is_selectable_on_every_target() {
+        let assets: Vec<ReleaseAsset> = HAUNTWARE_ASSETS.iter().map(|name| asset(name)).collect();
+        let cases = [
+            (
+                "planchette",
+                CpuArch::Arm64,
+                Some("planchette-macos-universal.zip"),
+                None,
+            ),
+            (
+                "poltergeist",
+                CpuArch::X86_64,
+                Some("poltergeist-macos-universal.zip"),
+                Some("poltergeist_1.9.0-1_amd64.deb"),
+            ),
+            (
+                "seance",
+                CpuArch::Arm64,
+                Some("seance-macos-universal.zip"),
+                None,
+            ),
+            (
+                "seance",
+                CpuArch::X86_64,
+                Some("seance-macos-universal.zip"),
+                Some("seance_1.9.0-1_amd64.deb"),
+            ),
+            // Shipped for Apple Silicon only on macOS, so an Intel Mac has nothing.
+            (
+                "seance-sync",
+                CpuArch::Arm64,
+                Some("seance-sync-macos-arm64.tar.gz"),
+                None,
+            ),
+            (
+                "seance-sync",
+                CpuArch::X86_64,
+                None,
+                Some("seance-sync-linux-x64.tar.gz"),
+            ),
+        ];
+
+        for (program, arch, macos, linux) in cases {
+            let filter = program_filter(program);
+            let candidates = || assets.iter().filter(|asset| filter.matches(&asset.name));
+            let selected_macos = find_macos_asset_for_arch(candidates(), arch);
+            let selected_linux = find_linux_asset_for_arch(candidates(), arch);
+            assert_eq!(selected_macos.map(|a| a.name.as_str()), macos, "{program}");
+            assert_eq!(selected_linux.map(|a| a.name.as_str()), linux, "{program}");
+        }
+    }
+
+    #[test]
+    fn the_asset_selection_wrapper_applies_the_filter_before_ranking() {
+        let assets = vec![
+            asset(&compatible_asset_name("planchette")),
+            asset(&compatible_asset_name("seance")),
+            asset(&compatible_asset_name("seance-sync")),
+        ];
+
+        let unfiltered = find_compatible_asset(&assets, None).unwrap();
+        let seance = find_compatible_asset(&assets, Some(&program_filter("Seance"))).unwrap();
+        let missing = find_compatible_asset(&assets, Some(&program_filter("poltergeist")));
+
+        assert_eq!(unfiltered.name, compatible_asset_name("planchette"));
+        assert_eq!(seance.name, compatible_asset_name("seance"));
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn release_programs_are_the_ones_this_platform_can_install() {
+        let release = release(
+            "v1.9.0",
+            false,
+            &[
+                &compatible_asset_name("seance"),
+                &compatible_asset_name("planchette"),
+                "seance-windows-x64.zip",
+                "poltergeist-windows-x64.zip",
+                "SHA256SUMS",
+            ],
+        );
+
+        let programs = release.programs();
+
+        assert_eq!(programs.version, "1.9.0");
+        assert_eq!(programs.programs, ["planchette", "seance"]);
+        assert_eq!(programs.default_program.as_deref(), Some("planchette"));
+    }
+
+    #[test]
+    fn a_filtered_program_missing_from_the_newest_release_comes_from_an_older_one() {
+        let releases = [
+            release("v2.0.0", false, &[&compatible_asset_name("planchette")]),
+            release(
+                "v1.9.0",
+                false,
+                &[
+                    &compatible_asset_name("planchette"),
+                    &compatible_asset_name("seance"),
+                ],
+            ),
+        ];
+        let seance = program_filter("seance");
+
+        assert!(!releases[0].has_compatible_asset(Some(&seance)));
+        let selected = select_recent_release(&releases, true, Some(&seance)).unwrap();
+
+        assert_eq!(selected.tag_name, "v1.9.0");
+        let built = selected.build_release(Some(&seance)).unwrap();
+        assert_eq!(built.file_name, compatible_asset_name("seance"));
+    }
+
+    #[test]
+    fn a_missing_program_is_reported_with_what_the_newest_release_offers() {
+        let releases = [
+            release(
+                "v2.1.0-beta.1",
+                true,
+                &[&compatible_asset_name("beta-only")],
+            ),
+            release(
+                "v2.0.0",
+                false,
+                &[
+                    &compatible_asset_name("seance"),
+                    &compatible_asset_name("planchette"),
+                ],
+            ),
+        ];
+
+        let error = select_recent_release(&releases, true, Some(&program_filter("seanse")))
+            .unwrap_err()
+            .to_string();
+
+        // The listing follows the tracked channel: the newer prerelease's
+        // program is not one the stable channel offers.
+        assert!(error.contains("stable release of \"seanse\""), "{error}");
+        assert!(
+            error.ends_with("The newest offers: planchette, seance"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn listed_programs_are_summarised_past_the_limit() {
+        let programs: Vec<String> = ["a", "b", "c", "d", "e", "f", "g"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        assert_eq!(list_programs(&programs[..2]), "a, b");
+        assert_eq!(list_programs(&programs[..5]), "a, b, c, d, e");
+        assert_eq!(list_programs(&programs), "a, b, c, d, e and 2 more");
     }
 }

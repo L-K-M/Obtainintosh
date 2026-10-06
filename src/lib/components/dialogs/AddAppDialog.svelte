@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { TauriService } from '$lib/tauri';
-  import type { App, SourceInput, SourceType } from '$lib/types';
+  import type { App, ReleasePrograms, SourceInput, SourceType } from '$lib/types';
   import { getErrorMessage } from '$lib/util/errors';
+  import { programDisplayName } from '$lib/util/programNames';
   import { BalloonHelp, Button, Dropdown, MovableDialog, TextInput } from '@lkmc/system7-ui';
 
 
@@ -18,6 +20,7 @@
   let sourceChoice: SourceChoice = app ? app.source_type : 'auto';
   let username = app?.username ?? '';
   let accessToken = app?.access_token ?? '';
+  let assetFilter = app?.asset_filter ?? '';
   let loading = false;
   let error: string | null = null;
 
@@ -33,6 +36,7 @@
     sourceChoice = app ? app.source_type : 'auto';
     username = app?.username ?? '';
     accessToken = app?.access_token ?? '';
+    assetFilter = app?.asset_filter ?? '';
     autoFilledName = '';
     error = null;
   }
@@ -52,6 +56,68 @@
   // Forgejo is self-hosted, so a private instance needs credentials that no
   // other source type uses.
   $: needsCredentials = sourceChoice === 'forgejo';
+
+  // The latest release's programs, looked up once the URL names a
+  // repository, so that a release with several can offer them as choices.
+  // `lookupKey` names the inputs the shown programs belong to: a reply for
+  // inputs that have changed since is dropped.
+  const PROGRAM_LOOKUP_DELAY_MS = 600;
+  let releasePrograms: ReleasePrograms | null = null;
+  let lookupKey = '';
+  let lookupTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $: scheduleProgramLookup(
+    url,
+    sourceChoice,
+    needsCredentials ? username : '',
+    needsCredentials ? accessToken : ''
+  );
+
+  // Offered only when there is a choice to make.
+  $: offeredPrograms =
+    releasePrograms && releasePrograms.programs.length > 1 ? releasePrograms.programs : [];
+  $: chosenProgram = offeredPrograms.includes(assetFilter.trim().toLowerCase())
+    ? assetFilter.trim().toLowerCase()
+    : '';
+  $: programOptions = [
+    { value: '', label: 'Choose…' },
+    ...offeredPrograms.map(program => ({ value: program, label: program }))
+  ];
+
+  function scheduleProgramLookup(...inputs: string[]) {
+    const key = JSON.stringify(inputs.map(input => input.trim()));
+    if (key === lookupKey) return;
+    lookupKey = key;
+    releasePrograms = null;
+    clearTimeout(lookupTimer);
+    if (!deriveNameFromUrl(url)) return;
+
+    lookupTimer = setTimeout(() => void lookUpPrograms(key), PROGRAM_LOOKUP_DELAY_MS);
+  }
+
+  async function lookUpPrograms(key: string) {
+    try {
+      const programs = await TauriService.listReleasePrograms(collectInput());
+      if (key === lookupKey) releasePrograms = programs;
+    } catch {
+      // Offering programs is a convenience. A repository the lookup cannot
+      // read is reported by the update check, with its reason.
+    }
+  }
+
+  onDestroy(() => clearTimeout(lookupTimer));
+
+  function chooseProgram(program: string) {
+    assetFilter = program;
+    if (isEdit || !program) return;
+
+    // Installed programs are found by name, so a name still derived from the
+    // repository follows the chosen program.
+    if (!name || name === autoFilledName) {
+      name = programDisplayName(program);
+      autoFilledName = name;
+    }
+  }
 
   function deriveNameFromUrl(url: string): string | null {
     // Forgejo lives on arbitrary hosts, so match the <owner>/<repo> shape
@@ -93,7 +159,8 @@
       // Credentials belong to Forgejo only: switching the source type away
       // from it drops them rather than storing keys nothing will send.
       username: needsCredentials ? username.trim() || null : null,
-      accessToken: needsCredentials ? accessToken.trim() || null : null
+      accessToken: needsCredentials ? accessToken.trim() || null : null,
+      assetFilter: assetFilter.trim() || null
     };
   }
 
@@ -156,6 +223,38 @@
       placeholder="Program Name"
       onkeydown={handleInputKeydown}
     />
+  </div>
+
+  <div class="s7-form-group">
+    <label for="asset-filter">Program in Release</label>
+    <TextInput
+      id="asset-filter"
+      bind:value={assetFilter}
+      clearable
+      placeholder="Optional"
+      onkeydown={handleInputKeydown}
+    />
+    {#if releasePrograms && offeredPrograms.length > 0}
+      <div class="hint program-choice">
+        <span>Release {releasePrograms.version} has several programs:</span>
+        <Dropdown
+          id="release-program"
+          options={programOptions}
+          value={chosenProgram}
+          disabled={loading}
+          onchange={(program) => chooseProgram(program)}
+        />
+      </div>
+      {#if !assetFilter.trim() && releasePrograms.defaultProgram}
+        <div class="hint">Without a choice, Obtainintosh downloads {releasePrograms.defaultProgram}.</div>
+      {/if}
+    {:else}
+      <div class="hint">
+        <BalloonHelp message="Some repositories publish several programs in each release. Enter the one to track as its file names begin (seance for seance-macos-universal.zip), or a pattern such as *-gtk4-*">
+          Only for releases with several programs.
+        </BalloonHelp>
+      </div>
+    {/if}
   </div>
 
   <div class="s7-form-group source-group">
@@ -235,6 +334,12 @@
     display: flex;
     align-items: baseline;
     gap: 4px;
+  }
+
+  .program-choice {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .actions {
