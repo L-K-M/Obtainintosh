@@ -78,10 +78,6 @@ const BUILD_WORDS: &[&str] = &[
     "intel",
     "silicon",
     "applesilicon",
-    "m1",
-    "m2",
-    "m3",
-    "m4",
     "gnu",
     "musl",
     "msvc",
@@ -120,7 +116,11 @@ impl AssetFilter {
             return Ok(None);
         }
 
-        let file_name = link_file_name(input).unwrap_or(input);
+        let file_name = if input.contains("://") {
+            link_file_name(input)?
+        } else {
+            input
+        };
         if file_name.contains(WILDCARDS) {
             if !file_name.chars().any(char::is_alphanumeric) {
                 return Err(format!(
@@ -193,14 +193,26 @@ pub fn program_name(file_name: &str) -> Option<String> {
     Some(name.join("-"))
 }
 
-/// The file name a download link points at, or `None` when the input is not
-/// a link: `https://host/o/r/releases/download/v1/seance.zip?x=1` → `seance.zip`.
-fn link_file_name(input: &str) -> Option<&str> {
-    if !input.contains("://") {
-        return None;
+/// The release file a download link points at:
+/// `https://host/o/r/releases/download/v1/seance.zip?x=1` → `seance.zip`. A
+/// link to anything else, such as the repository itself, names no program.
+fn link_file_name(link: &str) -> Result<&str, String> {
+    let path = link.split(['?', '#']).next().unwrap_or(link);
+    let file_name = path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path);
+    let lower = file_name.to_lowercase();
+    if PACKAGE_SUFFIXES
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+    {
+        return Ok(file_name);
     }
-    let path = input.split(['?', '#']).next().unwrap_or(input);
-    path.rsplit('/').next().filter(|name| !name.is_empty())
+    Err(format!(
+        "\"{link}\" is not a link to a release file. Enter the program's name instead, \
+         such as seance for seance-macos-universal.zip."
+    ))
 }
 
 /// The lowercase words of a file name without its packaging suffix. Unicode
@@ -221,6 +233,7 @@ fn describes_build(word: &str) -> bool {
     is_version(word)
         || is_commit_hash(word)
         || is_versioned_os(word)
+        || is_apple_chip(word)
         || OS_WORDS.contains(&word)
         || BUILD_WORDS.contains(&word)
         || UNSUPPORTED_CPU_MARKERS.contains(&word)
@@ -249,6 +262,16 @@ fn is_commit_hash(word: &str) -> bool {
     hash.len() >= MIN_COMMIT_HASH_LEN
         && hash.chars().all(|c| c.is_ascii_hexdigit())
         && hash.chars().any(|c| c.is_ascii_digit())
+}
+
+/// An Apple Silicon chip generation, `m1` onwards, so that builds named for
+/// one (`tool-m4.dmg`) need no list update when the next chip ships.
+fn is_apple_chip(word: &str) -> bool {
+    const MAX_GENERATION_DIGITS: usize = 2;
+    word.strip_prefix('m').is_some_and(|generation| {
+        (1..=MAX_GENERATION_DIGITS).contains(&generation.len())
+            && generation.chars().all(|c| c.is_ascii_digit())
+    })
 }
 
 /// An operating system name with its version fused on: `macos14`, `win11`,
@@ -340,6 +363,8 @@ mod tests {
             ("tool-aarch64-apple-darwin.tar.xz", "tool"),
             // Apple Silicon spellings and fused OS versions
             ("Tool-AppleSilicon.dmg", "tool"),
+            ("tool-m1.dmg", "tool"),
+            ("Tool-M5-Max.dmg", "tool"),
             ("Tool-Apple-Silicon.dmg", "tool"),
             ("tool-macos14-arm64.zip", "tool"),
             ("tool-win11-x64.zip", "tool"),
@@ -418,6 +443,18 @@ mod tests {
             AssetFilter::parse("seance-?.zip").unwrap(),
             Some(AssetFilter::Pattern("seance-?.zip".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_refuses_links_to_anything_but_a_release_file() {
+        for link in [
+            "https://github.com/L-K-M/Hauntware",
+            "https://github.com/L-K-M/Hauntware/",
+            "https://github.com/L-K-M/Hauntware/releases/tag/v1.9.0",
+        ] {
+            let error = AssetFilter::parse(link).unwrap_err();
+            assert!(error.contains("not a link to a release file"), "{error}");
+        }
     }
 
     #[test]

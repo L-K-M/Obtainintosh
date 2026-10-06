@@ -455,8 +455,17 @@ type TrackingKey = (String, Option<String>);
 fn tracking_key(app: &App) -> TrackingKey {
     (
         crate::sources::normalize_repo_url(&app.source_url),
-        app.asset_filter.clone(),
+        canonical_filter(app.asset_filter.as_deref()),
     )
+}
+
+/// The stored filter in canonical form. Every write path stores it that way
+/// already; this covers a hand-edited data file, where `Seance` and `seance`
+/// must still be one program and an empty filter none. A filter that does
+/// not parse is compared as written; its next check reports it.
+fn canonical_filter(stored: Option<&str>) -> Option<String> {
+    let stored = stored?;
+    crate::sources::AssetFilter::canonicalize(stored).unwrap_or_else(|_| Some(stored.to_string()))
 }
 
 fn already_tracked(app: &App) -> anyhow::Error {
@@ -1470,5 +1479,22 @@ mod tests {
 
         let stored = storage.get_app("second").unwrap().unwrap();
         assert_eq!(stored.name, "Renamed");
+    }
+
+    #[test]
+    fn hand_edited_filters_are_compared_in_canonical_form() {
+        let (storage, _temp) = storage_with(vec![
+            hauntware_app("capitalised", Some("Seance")),
+            hauntware_app("blank", Some("")),
+        ]);
+
+        let duplicate = storage.add_app(hauntware_app("", Some("seance")));
+        let unfiltered = storage.add_app(hauntware_app("", None));
+
+        assert!(
+            duplicate.is_err(),
+            "\"Seance\" and \"seance\" are one program"
+        );
+        assert!(unfiltered.is_err(), "an empty filter is no filter");
     }
 }

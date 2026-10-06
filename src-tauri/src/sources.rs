@@ -2468,6 +2468,85 @@ mod tests {
         );
     }
 
+    fn release_json(tag: &str, assets: &[String]) -> String {
+        let assets: Vec<serde_json::Value> = assets
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "size": 1024,
+                    "browser_download_url": format!("https://forge.invalid/download/{name}"),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "tag_name": tag,
+            "body": null,
+            "draft": false,
+            "prerelease": false,
+            "assets": assets,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_lists_the_programs_and_resolves_one_from_the_latest_release() {
+        let latest = release_json(
+            "v2.0.0",
+            &[
+                compatible_asset_name("planchette"),
+                compatible_asset_name("seance"),
+            ],
+        );
+        let (address, requests) = mock_forge(vec![(200, latest.clone()), (200, latest)]).await;
+        let adapter = ForgejoAdapter::new(ForgeCredentials::default());
+        let url = format!("{}/owner/repo", address);
+
+        let programs = adapter.get_release_programs(&url).await.unwrap();
+        let seance = adapter
+            .get_latest_release(&url, Some(&program_filter("seance")))
+            .await
+            .unwrap();
+
+        assert_eq!(programs.programs, ["planchette", "seance"]);
+        assert_eq!(programs.default_program.as_deref(), Some("planchette"));
+        assert_eq!(seance.file_name, compatible_asset_name("seance"));
+        // The latest release has the program, so the list is never read.
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .all(|request| request.target.ends_with("/releases/latest")));
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_finds_a_filtered_program_in_an_older_release() {
+        let latest = release_json("v2.0.0", &[compatible_asset_name("planchette")]);
+        let list = format!(
+            "[{}, {}]",
+            latest,
+            release_json(
+                "v1.9.0",
+                &[
+                    compatible_asset_name("planchette"),
+                    compatible_asset_name("seance"),
+                ],
+            )
+        );
+        let (address, requests) = mock_forge(vec![(200, latest), (200, list)]).await;
+
+        let release = ForgejoAdapter::new(ForgeCredentials::default())
+            .get_latest_release(
+                &format!("{}/owner/repo", address),
+                Some(&program_filter("seance")),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(release.version, "1.9.0");
+        assert_eq!(release.file_name, compatible_asset_name("seance"));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
     #[test]
     fn listed_programs_are_summarised_past_the_limit() {
         let programs: Vec<String> = ["a", "b", "c", "d", "e", "f", "g"]
