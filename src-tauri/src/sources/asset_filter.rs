@@ -44,8 +44,11 @@ const PACKAGE_SUFFIXES: &[&str] = &[
     ".exe",
     ".msi",
     ".7z",
+    ".tar",
     ".gz",
     ".xz",
+    ".bz2",
+    ".zst",
 ];
 
 /// Operating system names. Every marker either platform picker recognises is
@@ -265,7 +268,9 @@ fn is_commit_hash(word: &str) -> bool {
 }
 
 /// An Apple Silicon chip generation, `m1` onwards, so that builds named for
-/// one (`tool-m4.dmg`) need no list update when the next chip ships.
+/// one (`tool-m4.dmg`) need no list update when the next chip ships. The
+/// price: such a word inside a program's own name (`bmw-m3-tools`) ends the
+/// name early, which a wildcard pattern works around.
 fn is_apple_chip(word: &str) -> bool {
     const MAX_GENERATION_DIGITS: usize = 2;
     word.strip_prefix('m').is_some_and(|generation| {
@@ -372,6 +377,10 @@ mod tests {
             // Packaging variants of the same program
             ("Tool-Setup-1.0.pkg", "tool"),
             ("tool-portable-linux.zip", "tool"),
+            // Bare archive suffixes
+            ("tool.tar", "tool"),
+            ("tool.tar.zst", "tool"),
+            ("tool.bz2", "tool"),
         ];
         for (file_name, expected) in cases {
             assert_eq!(program(file_name).as_deref(), Some(expected), "{file_name}");

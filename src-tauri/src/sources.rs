@@ -222,6 +222,9 @@ fn no_compatible_release_message(
     if !programs.is_empty() {
         message.push_str(". The newest offers: ");
         message.push_str(&list_programs(&programs));
+    } else if newest.is_some() {
+        // Tells "no build for this platform at all" apart from a misspelling.
+        message.push_str(&format!(". The newest offers nothing for {PLATFORM_LABEL}"));
     }
     message
 }
@@ -2455,6 +2458,7 @@ mod tests {
             ),
         ];
 
+        // Misspelt on purpose: the filter must match no program.
         let error = select_recent_release(&releases, true, Some(&program_filter("seanse")))
             .unwrap_err()
             .to_string();
@@ -2513,6 +2517,7 @@ mod tests {
         assert_eq!(seance.file_name, compatible_asset_name("seance"));
         // The latest release has the program, so the list is never read.
         let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
         assert!(requests
             .iter()
             .all(|request| request.target.ends_with("/releases/latest")));
@@ -2548,6 +2553,20 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_program_is_reported_even_when_the_newest_release_offers_nothing_here() {
+        let releases = [release("v2.0.0", false, &["seance-windows-x64.zip"])];
+
+        let error = select_recent_release(&releases, true, Some(&program_filter("seance")))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.ends_with(&format!("The newest offers nothing for {PLATFORM_LABEL}")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn listed_programs_are_summarised_past_the_limit() {
         let programs: Vec<String> = ["a", "b", "c", "d", "e", "f", "g"]
             .iter()
@@ -2556,6 +2575,7 @@ mod tests {
 
         assert_eq!(list_programs(&programs[..2]), "a, b");
         assert_eq!(list_programs(&programs[..5]), "a, b, c, d, e");
+        assert_eq!(list_programs(&programs[..6]), "a, b, c, d, e and 1 more");
         assert_eq!(list_programs(&programs), "a, b, c, d, e and 2 more");
     }
 }
