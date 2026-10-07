@@ -9,24 +9,27 @@
 //!
 //! The files take the place of a release's assets, so program filters and
 //! the platform picker work on them unchanged. With no release tag to go by,
-//! the version is the one the chosen font declares, read with a few range
-//! requests rather than a download.
+//! the version is the one the chosen font declares.
 
+use super::remote_font::read_version;
 use super::{find_compatible_asset, list_programs, program_name, AssetFilter, ReleaseAsset};
-use crate::font_file::{self, Step, VersionReader};
+use crate::font_file;
 use crate::models::{Release, ReleasePrograms};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::collections::BTreeSet;
-use std::ops::Range;
 
 /// A forge's recursive listing of a repository's files. GitHub and Forgejo
-/// name these fields alike; only Forgejo pages the listing and counts it.
+/// name these fields alike. Only Forgejo pages the listing and counts it;
+/// only GitHub's `truncated` means the listing stops short (Forgejo sets it
+/// on every page of a paged listing).
 #[derive(Debug, Deserialize)]
 pub(super) struct Tree {
     pub(super) tree: Vec<TreeEntry>,
     #[serde(default)]
     pub(super) total_count: Option<usize>,
+    #[serde(default)]
+    pub(super) truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,64 +145,6 @@ impl RepositoryFonts {
             })
             .collect()
     }
-}
-
-/// The version a remote font declares, fetched a range at a time.
-async fn read_version(
-    url: &str,
-    request: &impl Fn(&str) -> reqwest::RequestBuilder,
-) -> Result<String> {
-    let mut reader = VersionReader::default();
-    let mut step = reader.start();
-    loop {
-        let range = match step {
-            Step::Version(version) => return Ok(version),
-            Step::Read(range) => range,
-        };
-        let bytes = read_range(request(url), range).await?;
-        step = reader
-            .advance(&bytes)
-            .with_context(|| format!("Could not read the version of {url}"))?;
-    }
-}
-
-/// Bytes `range` of a file, or as many of them as the file has.
-async fn read_range(request: reqwest::RequestBuilder, range: Range<u64>) -> Result<Vec<u8>> {
-    let wanted = usize::try_from(range.end - range.start)?;
-    let mut response = request
-        .header(
-            reqwest::header::RANGE,
-            format!("bytes={}-{}", range.start, range.end - 1),
-        )
-        .send()
-        .await
-        .context("Failed to fetch the font file")?;
-
-    let mut skip = match response.status() {
-        reqwest::StatusCode::PARTIAL_CONTENT => 0,
-        // A server that ignores ranges sends the whole file: skip to the
-        // range, and stop reading once it is in.
-        reqwest::StatusCode::OK => range.start,
-        // The range starts past the end of the file.
-        reqwest::StatusCode::RANGE_NOT_SATISFIABLE => return Ok(Vec::new()),
-        status => bail!("Failed to fetch the font file: HTTP {status}"),
-    };
-
-    let mut bytes = Vec::new();
-    while bytes.len() < wanted {
-        let Some(chunk) = response
-            .chunk()
-            .await
-            .context("Failed to read the font file")?
-        else {
-            break;
-        };
-        let skipped = usize::try_from(skip).unwrap_or(usize::MAX).min(chunk.len());
-        skip -= skipped as u64;
-        bytes.extend_from_slice(&chunk[skipped..]);
-    }
-    bytes.truncate(wanted);
-    Ok(bytes)
 }
 
 #[cfg(test)]

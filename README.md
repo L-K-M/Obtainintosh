@@ -131,7 +131,7 @@ Each program of a repository can be tracked once. Name each entry after its prog
 
 ### Fonts
 
-Font files (`.ttf`, `.otf`, `.ttc`, `.otc`) suit every platform, so their names need no platform term. They rank after every other format, so a release that offers a program and its font is tracked for the program. Where a font comes in several formats, the `.ttf` is downloaded.
+Font files (`.ttf`, `.otf`, `.ttc`, `.otc`) suit every platform, so their names need no platform term. They rank after every other format, so a release that offers a program and its font is tracked for the program. Where a font comes in several formats, the `.ttf` is downloaded. A released font's version is the one the font declares, so it compares with the installed copy whatever the release's tag says.
 
 A repository that publishes no releases, such as [C64 Keyboard](https://github.com/szabadkai/c64-keyboard-font), is tracked by the font files on its default branch instead, and so is a Forgejo repository with releases turned off. The latest version is the one the font declares (`Version 1.107`, or its revision when that has no number), read without downloading the font. A repository with several fonts offers them under **Program in Release**, like a release with several programs.
 

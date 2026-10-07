@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 
 mod asset_filter;
+mod remote_font;
 mod repository_fonts;
 
 use asset_filter::program_name;
@@ -266,6 +267,27 @@ enum Published {
     Fonts(RepositoryFonts),
 }
 
+/// A font released as an asset takes the version it declares, which is what
+/// an installed copy is compared with: a tag such as `r2024-01` says nothing
+/// about it. When the font cannot be read, the tag stands.
+async fn with_declared_font_version(
+    mut release: Release,
+    request: impl Fn(&str) -> reqwest::RequestBuilder,
+) -> Release {
+    if !font_file::is_font_file(&release.file_name) {
+        return release;
+    }
+
+    match remote_font::read_version(&release.download_url, &request).await {
+        Ok(version) => release.version = version,
+        Err(error) => log::warn!(
+            "Keeping the release tag as the version of {}: {error:#}",
+            release.file_name
+        ),
+    }
+    release
+}
+
 /// How many entries of a repository's file listing Forgejo is asked for at
 /// a time: its largest page.
 const TREE_PAGE_SIZE: usize = 1000;
@@ -369,7 +391,10 @@ impl GitHubAdapter {
         filter: Option<&AssetFilter>,
     ) -> Result<Release> {
         match self.resolve_release(repo_url, filter).await? {
-            Published::Release(release) => release.build_release(filter),
+            Published::Release(release) => {
+                let release = release.build_release(filter)?;
+                Ok(with_declared_font_version(release, Self::get_file).await)
+            }
             Published::Fonts(fonts) => fonts.release(filter, Self::get_file).await,
         }
     }
@@ -383,7 +408,7 @@ impl GitHubAdapter {
         }
     }
 
-    /// Requests a repository file. Downloads are not authenticated, so
+    /// Requests a file to download. Downloads are not authenticated, so
     /// neither is this.
     fn get_file(url: &str) -> reqwest::RequestBuilder {
         http_client().get(url)
@@ -475,6 +500,14 @@ impl GitHubAdapter {
             .json()
             .await
             .context("Failed to parse GitHub repository files")?;
+        if tree.truncated {
+            log::warn!(
+                "GitHub listed only part of the files of {}/{}; fonts among the rest \
+                 are not offered",
+                owner,
+                repo
+            );
+        }
         RepositoryFonts::from_tree(tree.tree, |path| {
             repository_file_url(GITHUB_RAW_ORIGIN, &[owner, repo, "HEAD"], path)
         })
@@ -563,24 +596,29 @@ impl ForgejoAdapter {
         repo_url: &str,
         filter: Option<&AssetFilter>,
     ) -> Result<Release> {
+        let auth = self.download_auth(repo_url)?;
+        let get_file = |url: &str| auth.authorize(http_client().get(url), url);
         match self.resolve_release(repo_url, filter).await? {
-            Published::Release(release) => release.build_release(filter),
-            Published::Fonts(fonts) => fonts.release(filter, |url| self.get_file(url)).await,
+            Published::Release(release) => {
+                let release = release.build_release(filter)?;
+                Ok(with_declared_font_version(release, get_file).await)
+            }
+            Published::Fonts(fonts) => fonts.release(filter, get_file).await,
         }
     }
 
     /// The programs the release an unfiltered entry would install offers
     /// this platform.
     pub async fn get_release_programs(&self, repo_url: &str) -> Result<ReleasePrograms> {
+        let auth = self.download_auth(repo_url)?;
         match self.resolve_release(repo_url, None).await? {
             Published::Release(release) => Ok(release.programs()),
-            Published::Fonts(fonts) => fonts.programs(|url| self.get_file(url)).await,
+            Published::Fonts(fonts) => {
+                fonts
+                    .programs(|url| auth.authorize(http_client().get(url), url))
+                    .await
+            }
         }
-    }
-
-    /// Requests a repository file, authenticated like the download of it.
-    fn get_file(&self, url: &str) -> reqwest::RequestBuilder {
-        self.credentials.authorize(http_client().get(url), url)
     }
 
     async fn resolve_release(
@@ -1715,11 +1753,14 @@ mod tests {
     }
 
     enum MockResponse {
-        /// A status and a JSON body.
+        /// A status and a JSON body, in which `{address}` stands for the
+        /// mock's own address.
         Json(u16, String),
         /// A file, served like a forge serves one: a `Range` request gets
         /// 206 Partial Content and just those bytes.
         File(Vec<u8>),
+        /// A file served whole, as by a server that ignores `Range`.
+        WholeFile(Vec<u8>),
     }
 
     fn header_value(lines: &[&str], name: &str) -> Option<String> {
@@ -1775,6 +1816,7 @@ mod tests {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = std::sync::Arc::clone(&requests);
 
+        let own_address = address.clone();
         tokio::spawn(async move {
             for response in responses {
                 let Ok((mut stream, _)) = listener.accept().await else {
@@ -1809,13 +1851,16 @@ mod tests {
                 });
 
                 let (status, content_type, body) = match response {
-                    MockResponse::Json(status, body) => {
-                        (status, "application/json", body.into_bytes())
-                    }
+                    MockResponse::Json(status, body) => (
+                        status,
+                        "application/json",
+                        body.replace("{address}", &own_address).into_bytes(),
+                    ),
                     MockResponse::File(file) => match range {
                         Some(range) => (206, "application/octet-stream", ranged(&file, &range)),
                         None => (200, "application/octet-stream", file),
                     },
+                    MockResponse::WholeFile(file) => (200, "application/octet-stream", file),
                 };
                 let reason = match status {
                     200 => "OK",
@@ -2918,6 +2963,100 @@ mod tests {
         assert_eq!(programs.programs, ["abacus-bold", "abacus-regular"]);
         assert_eq!(programs.default_program.as_deref(), Some("abacus-bold"));
         assert!(requests.lock().unwrap()[3].target.ends_with("&page=2"));
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_reads_font_versions_from_servers_that_ignore_ranges() {
+        let font = version_font("3.2");
+        let (address, _) = mock_forge_serving(vec![
+            MockResponse::Json(404, "{}".to_string()),
+            MockResponse::Json(200, "[]".to_string()),
+            MockResponse::Json(200, tree_json(&["Font.otf"], 1)),
+            MockResponse::WholeFile(font.clone()),
+            MockResponse::WholeFile(font),
+        ])
+        .await;
+
+        let release = ForgejoAdapter::new(ForgeCredentials::default())
+            .get_latest_release(&format!("{}/owner/repo", address), None)
+            .await
+            .unwrap();
+
+        assert_eq!(release.version, "3.2");
+    }
+
+    fn font_release_json(tag: &str, asset: &str) -> String {
+        serde_json::json!({
+            "tag_name": tag,
+            "body": null,
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+                "name": asset,
+                "size": 4096,
+                "browser_download_url": format!("{{address}}/owner/repo/releases/download/{tag}/{asset}"),
+            }],
+        })
+        .to_string()
+    }
+
+    /// An installed font is compared by the version it declares, so a
+    /// released font is too, whatever the tag says.
+    #[tokio::test]
+    async fn test_forgejo_released_fonts_take_the_version_they_declare() {
+        let (address, requests) = mock_forge_serving(vec![
+            MockResponse::Json(200, font_release_json("r2024-01", "Font-Regular.ttf")),
+            MockResponse::File(version_font("1.107")),
+            MockResponse::File(version_font("1.107")),
+        ])
+        .await;
+
+        let release = ForgejoAdapter::new(ForgeCredentials::new(
+            Some("alice".to_string()),
+            Some("key123".to_string()),
+        ))
+        .get_latest_release(&format!("{}/owner/repo", address), None)
+        .await
+        .unwrap();
+
+        assert_eq!(release.version, "1.107");
+        assert_eq!(release.file_name, "Font-Regular.ttf");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        // Read on the instance, so with its credentials.
+        assert!(requests[1].authorization.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_an_unreadable_released_font_keeps_the_tag() {
+        let (address, _) = mock_forge_serving(vec![
+            MockResponse::Json(200, font_release_json("v2.0", "Font-Regular.ttf")),
+            MockResponse::File(b"version https://git-lfs.github.com/spec/v1".to_vec()),
+        ])
+        .await;
+
+        let release = ForgejoAdapter::new(ForgeCredentials::default())
+            .get_latest_release(&format!("{}/owner/repo", address), None)
+            .await
+            .unwrap();
+
+        assert_eq!(release.version, "2.0");
+    }
+
+    #[test]
+    fn repository_file_paths_cannot_leave_the_repository() {
+        let url = repository_file_url(
+            GITHUB_RAW_ORIGIN,
+            &["owner", "repo", "HEAD"],
+            "../../other/repo/HEAD/Font.ttf",
+        )
+        .unwrap();
+
+        assert!(
+            url.starts_with("https://raw.githubusercontent.com/owner/repo/HEAD/"),
+            "{url}"
+        );
+        assert!(!url.contains(".."), "{url}");
     }
 
     #[test]

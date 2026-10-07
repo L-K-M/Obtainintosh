@@ -155,21 +155,29 @@ fn version_tables(directory: &[u8]) -> Result<VersionTables> {
     let table_count = read_u16(directory, 4).context("Truncated font header")?;
     for index in 0..usize::from(table_count) {
         let record = 12 + 16 * index;
-        let tag = directory
-            .get(record..record + 4)
-            .context("Truncated font table directory")?;
+        // A directory reaching past the first read ends there; the tables
+        // found before that still count.
+        let (Some(tag), Some(offset), Some(length)) = (
+            directory.get(record..record + 4),
+            read_u32(directory, record + 8),
+            read_u32(directory, record + 12),
+        ) else {
+            break;
+        };
         let table = match tag {
             tag if tag == NAME_TABLE_TAG => &mut tables.name,
             tag if tag == HEAD_TABLE_TAG => &mut tables.head,
             _ => continue,
         };
 
-        let offset = u64::from(read_u32(directory, record + 8).context("Truncated font table")?);
-        let length = u64::from(read_u32(directory, record + 12).context("Truncated font table")?);
+        let (offset, length) = (u64::from(offset), u64::from(length));
         if length > MAX_TABLE_LEN {
             bail!("The font's tables are implausibly large");
         }
-        *table = Some(offset..offset + length);
+        // An empty table holds no version.
+        if length > 0 {
+            *table = Some(offset..offset + length);
+        }
     }
 
     Ok(tables)
@@ -433,6 +441,30 @@ pub(crate) mod tests {
             assert_eq!(version.unwrap(), expected);
             assert_eq!(reads.len(), 3);
         }
+    }
+
+    /// Where the `name` table's length sits in a `sfnt_at` font: the second
+    /// record of the directory, twelve bytes in.
+    const NAME_LENGTH_AT: usize = 12 + 16 + 12;
+
+    #[test]
+    fn an_empty_name_table_falls_back_to_the_revision() {
+        let mut font = sfnt_at(0, b"OTTO", &[(WINDOWS_PLATFORM, "Version 1.0")], 65536);
+        font[NAME_LENGTH_AT..NAME_LENGTH_AT + 4].copy_from_slice(&0u32.to_be_bytes());
+
+        let (version, reads) = read_version(&font);
+
+        assert_eq!(version.unwrap(), "1.000");
+        assert_eq!(reads.len(), 2);
+    }
+
+    #[test]
+    fn a_directory_longer_than_the_first_read_keeps_the_tables_found() {
+        let mut font = font_bytes(&[(WINDOWS_PLATFORM, "Version 1.2")]);
+        // More tables than the first read could ever hold.
+        font[4..6].copy_from_slice(&300u16.to_be_bytes());
+
+        assert_eq!(read_version(&font).0.unwrap(), "1.2");
     }
 
     #[test]
