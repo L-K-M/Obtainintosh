@@ -163,7 +163,7 @@ To create local bundles (a `.dmg` on macOS; a `.deb`, an `.AppImage` and a `.fla
 
 ```bash
 scripts/build.sh            # everything this machine can build
-scripts/build.sh --install  # on macOS also copy Obtainintosh.app to /Applications
+scripts/build.sh --install  # macOS only: build Obtainintosh.app into /Applications
 scripts/build.sh --run      # …or launch it
 ```
 

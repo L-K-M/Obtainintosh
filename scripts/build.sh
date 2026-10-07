@@ -94,7 +94,10 @@ fi
 # The bundled .app path differs by --target: with a cross triple it lands under
 # target/<triple>/release/bundle/, a native build under target/release/bundle/.
 macos_app() {
-  find src-tauri/target -maxdepth 6 -type d -path '*/release/bundle/macos/Obtainintosh.app' | head -1
+  # Stale triple-specific bundles can sit beside the fresh native one;
+  # newest mtime wins.
+  ls -td src-tauri/target/release/bundle/macos/Obtainintosh.app \
+         src-tauri/target/*/release/bundle/macos/Obtainintosh.app 2>/dev/null | head -1
 }
 
 for target in "${TARGETS[@]}"; do
@@ -149,7 +152,9 @@ for target in "${TARGETS[@]}"; do
           # macOS truncates process names to 15 chars (MAXCOMLEN).
           if pgrep -x "${exe:0:15}" >/dev/null; then
             echo "-- quitting running $exe"
-            pkill -x "${exe:0:15}"; sleep 1
+            # The process can exit between pgrep and pkill; don't let the
+            # race abort the install under set -e.
+            pkill -x "${exe:0:15}" || true; sleep 1
           fi
           echo "-- installing /Applications/$exe.app"
           if ! rm -rf "/Applications/$exe.app"; then
