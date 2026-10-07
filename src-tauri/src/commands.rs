@@ -42,8 +42,8 @@ const REVEAL_SUCCESS_MESSAGE: &str =
     "The file was revealed in Finder. Please double-click it to install.";
 #[cfg(not(target_os = "macos"))]
 const REVEAL_SUCCESS_MESSAGE: &str = "The file was revealed in the file manager. \
-     Please install it from there (a .deb opens in the package installer; an \
-     AppImage needs to be marked executable).";
+     Please install it from there (a .deb opens in the package installer and a \
+     font in the font viewer; an AppImage needs to be marked executable).";
 
 /// Holds the single global download slot for as long as it is alive, so a
 /// second download — for any app — is refused rather than racing the first.
@@ -502,9 +502,26 @@ pub async fn check_for_updates(
     )
     .await;
 
+    let font_lookups = checked
+        .iter()
+        .zip(&snapshots)
+        .map(|(joined, snapshot)| match joined {
+            Ok((_, Ok(release))) => crate::installer::is_font_file(&release.file_name)
+                .then(|| FontLookup::Named(release.file_name.clone())),
+            _ => snapshot
+                .install_path
+                .clone()
+                .filter(|path| crate::installer::is_font_file(path))
+                .map(FontLookup::LastFoundAt),
+        })
+        .collect();
+    let installed_fonts = detect_fonts_for_check(font_lookups).await?;
+
     let mut outcomes = Vec::with_capacity(total);
-    for (joined, snapshot) in checked.into_iter().zip(snapshots) {
-        let (app, result) = match joined {
+    for ((joined, snapshot), installed_font) in
+        checked.into_iter().zip(snapshots).zip(installed_fonts)
+    {
+        let (mut app, result) = match joined {
             Ok(checked) => checked,
             Err(error) => {
                 // The task died rather than returning an error. Record that
@@ -516,6 +533,11 @@ pub async fn check_for_updates(
                 )
             }
         };
+
+        if let Some((current_version, install_path)) = installed_font {
+            app.current_version = current_version;
+            app.install_path = install_path;
+        }
 
         let failure_state = match app.source_type {
             SourceType::GitLab => CheckAttemptState::Unsupported,
@@ -1079,6 +1101,54 @@ async fn detect_apps_for_check(
     })
     .await
     .map_err(|error| format!("Installed-app detection failed: {error}"))
+}
+
+/// How a check finds where a font is installed.
+enum FontLookup {
+    /// The lookup named the font's file, so the font directories are searched
+    /// for it.
+    Named(String),
+    /// The lookup failed. The copy found last time is read again, so the
+    /// installed version stays known while the forge cannot be reached.
+    LastFoundAt(String),
+}
+
+/// The installed version and location of each font, in one blocking pass
+/// that scans the font directories only when a lookup named a font. A None
+/// lookup (not a font) gives None, leaving the program detection in place.
+async fn detect_fonts_for_check(
+    lookups: Vec<Option<FontLookup>>,
+) -> Result<Vec<Option<(Option<String>, Option<String>)>>, String> {
+    if lookups.iter().all(Option::is_none) {
+        return Ok(lookups.iter().map(|_| None).collect());
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let index = lookups
+            .iter()
+            .any(|lookup| matches!(lookup, Some(FontLookup::Named(_))))
+            .then(crate::installer::InstalledFontIndex::scan);
+        lookups
+            .into_iter()
+            .map(|lookup| {
+                let installed = match lookup? {
+                    FontLookup::Named(file_name) => {
+                        index.as_ref().and_then(|index| index.detect(&file_name))
+                    }
+                    FontLookup::LastFoundAt(path) => {
+                        crate::installer::installed_font_version(Path::new(&path))
+                            .map(|version| (path, version))
+                    }
+                };
+                Some(match installed {
+                    Some((path, version)) => (Some(version), Some(path)),
+                    None => (None, None),
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("Installed-font detection failed: {error}"))
 }
 
 /// Runs `operation` over `inputs` with at most `limit` in flight, returning

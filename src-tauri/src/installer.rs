@@ -5,8 +5,13 @@
 //! AppImages. Both sides expose the same surface — `InstalledAppIndex` for
 //! batch checks, `detect_installed_app` for a single program, and
 //! `detect_running_bundle` for the build that is currently running — so the
-//! commands layer stays platform-free.
+//! commands layer stays platform-free. Fonts are found in the font
+//! directories instead, by the file name a release gives them.
 
+mod fonts;
+
+pub(crate) use crate::font_file::is_font_file;
+pub(crate) use fonts::{installed_font_version, InstalledFontIndex};
 pub(crate) use platform::InstalledAppIndex;
 pub use platform::{detect_installed_app, detect_running_bundle};
 

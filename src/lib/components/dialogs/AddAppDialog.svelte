@@ -238,7 +238,7 @@
     />
     {#if releasePrograms && offeredPrograms.length > 0}
       <div class="hint program-choice">
-        <label for="release-program">Release {releasePrograms.version} has several programs:</label>
+        <label for="release-program">Version {releasePrograms.version} has several programs:</label>
         <Dropdown
           id="release-program"
           options={programOptions}

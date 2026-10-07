@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
 
-Obtainintosh is a desktop app for macOS and Linux that tracks applications distributed through GitHub or Forgejo releases. It compares releases with what is installed — `.app` bundles in `/Applications` or `~/Applications` on macOS; dpkg packages and AppImages on Linux — downloads a release asset suitable for the platform it runs on, and reveals the downloaded file in the file manager.
+Obtainintosh is a desktop app for macOS and Linux that tracks applications and fonts distributed through GitHub or Forgejo releases. It compares releases with what is installed — `.app` bundles in `/Applications` or `~/Applications` on macOS; dpkg packages and AppImages on Linux; fonts in the font folders on both — downloads a release asset suitable for the platform it runs on, and reveals the downloaded file in the file manager.
 
 Obtainintosh currently supports GitHub repositories and Forgejo instances, including private instances that require a username and an application key. GitLab and arbitrary download pages are not supported.
 
@@ -47,7 +47,7 @@ On Ubuntu (and other Debian-family distributions):
 4. Leave **Source** on *Detect automatically* for a `github.com` repository, and choose *Forgejo* for an instance whose address does not identify the software. See [Forgejo instances](#forgejo-instances).
 5. Check for updates. Obtainintosh also checks tracked applications when it starts.
 6. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS). If the latest version's file is already in that directory, the download button is replaced by a folder button that reveals the cached file instead of downloading it again; the download button returns once a newer version is released or the file is cleared from the temporary directory.
-7. Open the downloaded file (`.dmg`, `.pkg`, `.deb`, archive, …) and complete installation manually. An `.AppImage` just needs to be marked executable and moved wherever you keep AppImages.
+7. Open the downloaded file (`.dmg`, `.pkg`, `.deb`, archive, font, …) and complete installation manually. An `.AppImage` just needs to be marked executable and moved wherever you keep AppImages.
 
 Obtainintosh reads the latest published release. If a repository has no normal latest release, it can fall back to the newest non-draft release, including a prerelease.
 
@@ -107,6 +107,7 @@ On macOS, it looks for these formats in priority order:
 3. `.app.tar.gz`
 4. `.tar.gz`
 5. `.zip`
+6. Font files (see [Fonts](#fonts))
 
 For generic archives such as `.tar.gz` and `.zip`, the filename must identify macOS or a supported architecture with a term such as `mac`, `macos`, `darwin`, `osx`, `universal`, `arm64`, `aarch64`, or `x86_64`. Universal assets are preferred, followed by assets matching the Mac's native architecture.
 
@@ -116,6 +117,7 @@ On Linux, the priority order is:
 2. `.AppImage`
 3. `.tar.gz`
 4. `.zip`
+5. Font files (see [Fonts](#fonts))
 
 For generic archives, the filename must identify Linux with a term such as `linux`, `ubuntu`, or `debian`. Assets naming the machine's architecture (`amd64`, `x86_64`, `arm64`, `aarch64`) are preferred over unmarked ones, and assets naming a different architecture are skipped — there is no Rosetta on Linux. `.rpm` assets are not used.
 
@@ -126,6 +128,14 @@ Some repositories publish several programs in each release, such as [Hauntware](
 A program is identified by how its file names begin, up to the first part that describes a version, platform, or architecture. `seance` matches `seance-macos-universal.zip` and `seance_1.9.0-1_amd64.deb`, but not `seance-sync-linux-x64.tar.gz`, which belongs to `seance-sync`. Case does not matter, and a pasted file name or download link counts as the program it belongs to. For a naming scheme this cannot tell apart, enter a pattern over the whole file name instead, where `*` stands for any text and `?` for one character, for example `*-gtk4-*`. The platform rules above still apply among the chosen program's files.
 
 Each program of a repository can be tracked once. Name each entry after its program, so that its installed version can be detected. If the latest release lacks the chosen program, Obtainintosh uses the newest of the 10 most recent releases that has it.
+
+### Fonts
+
+Font files (`.ttf`, `.otf`, `.ttc`, `.otc`) suit every platform, so their names need no platform term. They rank after every other format, so a release that offers a program and its font is tracked for the program. Where a font comes in several formats, the `.ttf` is downloaded. A released font's version is the one the font declares, so it compares with the installed copy whatever the release's tag says.
+
+A repository that publishes no releases, such as [C64 Keyboard](https://github.com/szabadkai/c64-keyboard-font), is tracked by the font files on its default branch instead, and so is a Forgejo repository with releases turned off. The latest version is the one the font declares (`Version 1.107`, or its revision when that has no number), read without downloading the font. A repository with several fonts offers them under **Program in Release**, like a release with several programs.
+
+The installed version is read from the font with the same file name, in any of these formats, in the font folders: `~/Library/Fonts` and `/Library/Fonts` on macOS; `~/.local/share/fonts`, `~/.fonts`, `/usr/local/share/fonts`, and `/usr/share/fonts` on Linux. Font Book and GNOME Fonts keep the file name when they install a font, so the entry's name does not matter. When several copies are installed, the highest version counts.
 
 ## GitHub token and rate limits
 
@@ -195,7 +205,7 @@ The repository has no published releases that Obtainintosh can see. Draft releas
 
 ### `Repository not found on this Forgejo instance`
 
-- Confirm the URL is `<instance>/<owner>/<repository>`, and that the repository has at least one published release.
+- Confirm the URL is `<instance>/<owner>/<repository>`, and that the repository has at least one published release or, with releases turned off, a font file.
 - For a private repository, confirm the username and application key are filled in and that the key has read access to it. Forgejo answers the same way for a repository that does not exist and for one the credentials cannot see.
 
 ### `Forgejo rejected the credentials`
