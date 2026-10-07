@@ -159,13 +159,15 @@ npm ci
 npm run tauri dev
 ```
 
-To create local bundles (a `.dmg` on macOS; a `.deb` and an `.AppImage` on Linux):
+To create local bundles (a `.dmg` on macOS; a `.deb`, an `.AppImage` and a `.flatpak` on Linux):
 
 ```bash
-npm run tauri build
+scripts/build.sh            # everything this machine can build
+scripts/build.sh --install  # macOS only: build Obtainintosh.app into /Applications
+scripts/build.sh --run      # …or launch it
 ```
 
-Bundles for the host architecture are written below `src-tauri/target/release/bundle/`. The release workflow cross-builds the separate Apple Silicon and Intel targets and builds the Linux packages on Ubuntu 22.04.
+Bundles for the host architecture are written below `src-tauri/target/release/bundle/` (the `.flatpak` lands in `dist/`). The release workflow cross-builds the separate Apple Silicon and Intel targets and builds the Linux packages on Ubuntu 22.04.
 
 ## Troubleshooting
 
