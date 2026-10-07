@@ -410,6 +410,13 @@ mod tests {
     }
 
     #[test]
+    fn every_font_format_is_a_package_suffix() {
+        for extension in crate::font_file::FONT_EXTENSIONS {
+            assert!(PACKAGE_SUFFIXES.contains(&extension), "{extension}");
+        }
+    }
+
+    #[test]
     fn each_font_file_is_a_program_whatever_its_format() {
         for file_name in ["C64Keyboard-Regular.ttf", "C64Keyboard-Regular.OTF"] {
             assert_eq!(

@@ -54,7 +54,8 @@ impl InstalledFontIndex {
     }
 }
 
-/// The version of the font file at `path`, or None when it is gone.
+/// The version of the font file at `path`, or None when it is gone or
+/// cannot be read.
 pub(crate) fn installed_font_version(path: &Path) -> Option<String> {
     read_version(path).ok()
 }

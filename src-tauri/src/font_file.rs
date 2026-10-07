@@ -242,7 +242,7 @@ fn version_number(text: &str) -> Option<String> {
         Some(prefix) if prefix.eq_ignore_ascii_case("version") => &text[7..],
         _ => text,
     };
-    let text = text.trim_start();
+    let text = text.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
     let text = text.strip_prefix(['v', 'V']).unwrap_or(text);
 
     let number: String = text
@@ -405,6 +405,7 @@ pub(crate) mod tests {
     fn version_strings_lose_their_prefix_and_build_notes() {
         for (text, expected) in [
             ("Version 1.107", Some("1.107")),
+            ("Version: 1.2", Some("1.2")),
             ("Version 2.304; ttfautohint (v1.8.4.7-5d5b)", Some("2.304")),
             ("Version 4.001;git-0a5106e0b", Some("4.001")),
             ("version 1.00 December 1, 2020", Some("1.00")),
