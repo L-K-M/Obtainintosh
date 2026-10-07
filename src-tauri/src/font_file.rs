@@ -248,10 +248,8 @@ fn version_number(text: &str) -> Option<String> {
 }
 
 fn decode_utf16_be(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-        .collect();
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_be_bytes(*pair)).collect();
     String::from_utf16_lossy(&units)
 }
 
