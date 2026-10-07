@@ -205,8 +205,12 @@ The repository has no published releases that Obtainintosh can see. Draft releas
 
 ### `Repository not found on this Forgejo instance`
 
-- Confirm the URL is `<instance>/<owner>/<repository>`, and that the repository has at least one published release or, with releases turned off, a font file.
+- Confirm the URL is `<instance>/<owner>/<repository>`.
 - For a private repository, confirm the username and application key are filled in and that the key has read access to it. Forgejo answers the same way for a repository that does not exist and for one the credentials cannot see.
+
+### `This repository has its releases turned off and no font files to track`
+
+The repository is visible, but its releases are turned off in its settings, so it publishes nothing to download. Such a repository can only be tracked by its font files (see [Fonts](#fonts)).
 
 ### `Forgejo rejected the credentials`
 

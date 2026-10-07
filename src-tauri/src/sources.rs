@@ -661,14 +661,15 @@ impl ForgejoAdapter {
         let Some(releases) = self.get_recent_releases(&releases_url).await? else {
             // A repository with releases turned off answers 404 here, like
             // one the credentials cannot see. Its files tell the two apart.
-            return self
-                .get_repository_fonts(&base_url, &owner, &repo)
-                .await?
-                .map(Published::Fonts)
-                .context(FORGEJO_REPOSITORY_NOT_FOUND);
+            return match self.get_repository_files(&base_url, &owner, &repo).await? {
+                RepositoryFiles::Fonts(fonts) => Ok(Published::Fonts(fonts)),
+                RepositoryFiles::WithoutFonts => Err(anyhow::anyhow!(FORGEJO_RELEASES_TURNED_OFF)),
+                RepositoryFiles::NotFound => Err(anyhow::anyhow!(FORGEJO_REPOSITORY_NOT_FOUND)),
+            };
         };
         if !stable_release_published && !has_published_release(&releases) {
-            if let Some(fonts) = self.get_repository_fonts(&base_url, &owner, &repo).await? {
+            let files = self.get_repository_files(&base_url, &owner, &repo).await?;
+            if let RepositoryFiles::Fonts(fonts) = files {
                 return Ok(Published::Fonts(fonts));
             }
         }
@@ -699,14 +700,14 @@ impl ForgejoAdapter {
             .context("Failed to parse Forgejo releases")
     }
 
-    /// The font files on the repository's default branch, if it has any.
-    /// Forgejo pages the listing; `total_count` says when it is complete.
-    async fn get_repository_fonts(
+    /// The font files on the repository's default branch. Forgejo pages
+    /// the listing; `total_count` says when it is complete.
+    async fn get_repository_files(
         &self,
         base_url: &str,
         owner: &str,
         repo: &str,
-    ) -> Result<Option<RepositoryFonts>> {
+    ) -> Result<RepositoryFiles> {
         let tree_url = format!(
             "{}/api/v1/repos/{}/{}/git/trees/HEAD?recursive=true&per_page={}",
             base_url, owner, repo, TREE_PAGE_SIZE
@@ -721,7 +722,7 @@ impl ForgejoAdapter {
                 .context("Failed to fetch Forgejo repository files")?;
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Ok(None);
+                return Ok(RepositoryFiles::NotFound);
             }
             if !response.status().is_success() {
                 anyhow::bail!("{}", forgejo_error(response.status()));
@@ -750,13 +751,14 @@ impl ForgejoAdapter {
         }
 
         let raw_origin = format!("{}/", base_url);
-        RepositoryFonts::from_tree(entries, |path| {
+        let fonts = RepositoryFonts::from_tree(entries, |path| {
             repository_file_url(
                 &raw_origin,
                 &["api", "v1", "repos", owner, repo, "raw"],
                 path,
             )
-        })
+        })?;
+        Ok(fonts.map_or(RepositoryFiles::WithoutFonts, RepositoryFiles::Fonts))
     }
 
     /// The credentials to reuse for the asset download that follows a release
@@ -771,6 +773,19 @@ impl ForgejoAdapter {
         })
     }
 }
+
+/// What listing a Forgejo repository's files finds.
+enum RepositoryFiles {
+    /// The listing is not found: the repository is not visible.
+    NotFound,
+    WithoutFonts,
+    Fonts(RepositoryFonts),
+}
+
+/// Shown for a visible repository whose release list is not found: its
+/// releases are turned off in its settings.
+const FORGEJO_RELEASES_TURNED_OFF: &str = "This repository has its releases turned off \
+     and no font files to track.";
 
 /// Shown when a Forgejo repository cannot be found, which is also how a
 /// private one looks to missing or wrong credentials.
@@ -3043,6 +3058,27 @@ mod tests {
         assert_eq!(release.version, "2.0");
     }
 
+    #[tokio::test]
+    async fn test_forgejo_releases_turned_off_without_fonts_are_named_as_such() {
+        // The release list 404s, but the files are listed: the repository is
+        // visible, so the credentials are not the problem.
+        let (address, _) = mock_forge_serving(vec![
+            MockResponse::Json(404, "{}".to_string()),
+            MockResponse::Json(404, "{}".to_string()),
+            MockResponse::Json(200, tree_json(&["README.md"], 1)),
+        ])
+        .await;
+
+        let error = ForgejoAdapter::new(ForgeCredentials::default())
+            .get_latest_release(&format!("{}/owner/repo", address), None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("releases turned off"), "{error}");
+        assert!(!error.contains("application key"), "{error}");
+    }
+
     #[test]
     fn repository_file_paths_cannot_leave_the_repository() {
         let url = repository_file_url(
@@ -3052,11 +3088,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            url.starts_with("https://raw.githubusercontent.com/owner/repo/HEAD/"),
-            "{url}"
+        // The url crate drops "." and ".." segments rather than encoding
+        // them, so none can reach a server that decodes and resolves them.
+        assert_eq!(
+            url,
+            "https://raw.githubusercontent.com/owner/repo/HEAD/other/repo/HEAD/Font.ttf"
         );
-        assert!(!url.contains(".."), "{url}");
     }
 
     #[test]
