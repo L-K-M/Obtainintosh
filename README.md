@@ -14,9 +14,6 @@ Obtainintosh currently supports GitHub repositories and Forgejo instances, inclu
 
 ![Main window screenshot showing a list of programs in different states](./screenshot.png)
 
-> [!NOTE]
-> This project was developed with assistance from large language models (AI coding tools).
-
 ## Platform support
 
 The release workflow builds Obtainintosh for:
