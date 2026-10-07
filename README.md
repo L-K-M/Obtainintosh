@@ -210,7 +210,7 @@ The repository has no published releases that Obtainintosh can see. Draft releas
 
 ### `This repository has its releases turned off and no font files to track`
 
-The repository is visible, but its releases are turned off in its settings, so it publishes nothing to download. Such a repository can only be tracked by its font files (see [Fonts](#fonts)).
+The repository is visible, but its releases are turned off in its settings, so it publishes nothing to download. Obtainintosh tracks such a repository by the font files on its default branch (see [Fonts](#fonts)), and this one has none.
 
 ### `Forgejo rejected the credentials`
 

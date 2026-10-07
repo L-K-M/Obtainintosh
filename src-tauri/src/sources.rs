@@ -661,11 +661,18 @@ impl ForgejoAdapter {
         let Some(releases) = self.get_recent_releases(&releases_url).await? else {
             // A repository with releases turned off answers 404 here, like
             // one the credentials cannot see. Its files tell the two apart.
-            return match self.get_repository_files(&base_url, &owner, &repo).await? {
-                RepositoryFiles::Fonts(fonts) => Ok(Published::Fonts(fonts)),
-                RepositoryFiles::WithoutFonts => Err(anyhow::anyhow!(FORGEJO_RELEASES_TURNED_OFF)),
-                RepositoryFiles::NotFound => Err(anyhow::anyhow!(FORGEJO_REPOSITORY_NOT_FOUND)),
+            let message = match self.get_repository_files(&base_url, &owner, &repo).await? {
+                RepositoryFiles::Fonts(fonts) => return Ok(Published::Fonts(fonts)),
+                RepositoryFiles::WithoutFonts => FORGEJO_RELEASES_TURNED_OFF,
+                // An empty repository, or one with its code turned off too,
+                // has no files to list either. The repository itself shows
+                // whether it can be seen.
+                RepositoryFiles::NotFound if self.is_visible(&base_url, &owner, &repo).await? => {
+                    FORGEJO_RELEASES_TURNED_OFF
+                }
+                RepositoryFiles::NotFound => FORGEJO_REPOSITORY_NOT_FOUND,
             };
+            anyhow::bail!(message);
         };
         if !stable_release_published && !has_published_release(&releases) {
             let files = self.get_repository_files(&base_url, &owner, &repo).await?;
@@ -698,6 +705,23 @@ impl ForgejoAdapter {
             .await
             .map(Some)
             .context("Failed to parse Forgejo releases")
+    }
+
+    /// Whether the credentials can see the repository at all.
+    async fn is_visible(&self, base_url: &str, owner: &str, repo: &str) -> Result<bool> {
+        let response = self
+            .get(&format!("{}/api/v1/repos/{}/{}", base_url, owner, repo))
+            .send()
+            .await
+            .context("Failed to fetch the Forgejo repository")?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            anyhow::bail!("{}", forgejo_error(response.status()));
+        }
+        Ok(true)
     }
 
     /// The font files on the repository's default branch. Forgejo pages
@@ -776,19 +800,22 @@ impl ForgejoAdapter {
 
 /// What listing a Forgejo repository's files finds.
 enum RepositoryFiles {
-    /// The listing is not found: the repository is not visible.
+    /// The listing is not found: the repository is not visible, or has no
+    /// files to list.
     NotFound,
+    /// The listing is found, so the repository is visible, but it holds no
+    /// font files.
     WithoutFonts,
     Fonts(RepositoryFonts),
 }
 
 /// Shown for a visible repository whose release list is not found: its
-/// releases are turned off in its settings.
+/// releases are turned off in its settings. The README quotes it.
 const FORGEJO_RELEASES_TURNED_OFF: &str = "This repository has its releases turned off \
      and no font files to track.";
 
 /// Shown when a Forgejo repository cannot be found, which is also how a
-/// private one looks to missing or wrong credentials.
+/// private one looks to missing or wrong credentials. The README quotes it.
 const FORGEJO_REPOSITORY_NOT_FOUND: &str = "Repository not found on this Forgejo instance. \
      A private repository also looks like this when the username or application key is \
      missing or wrong.";
@@ -1995,8 +2022,9 @@ mod tests {
     async fn test_forgejo_missing_repository_points_at_the_credentials() {
         // A private repository the credentials cannot see 404s just like a
         // repository that does not exist, so the message has to cover both.
-        // The release list and the file listing both 404.
-        let (address, _) = mock_forge(vec![(404, "{}".to_string()); 3]).await;
+        // The latest release, the release list, the file listing and the
+        // repository itself all 404.
+        let (address, _) = mock_forge(vec![(404, "{}".to_string()); 4]).await;
 
         let adapter = ForgejoAdapter::new(ForgeCredentials::default());
         let error = adapter
@@ -3060,11 +3088,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_forgejo_releases_turned_off_without_fonts_are_named_as_such() {
-        // The release list 404s, but the files are listed: the repository is
-        // visible, so the credentials are not the problem.
+        // The files are listed, so the repository is visible and the
+        // credentials are not the problem.
         let (address, _) = mock_forge_serving(vec![
+            // releases/latest
             MockResponse::Json(404, "{}".to_string()),
+            // releases?limit=10
             MockResponse::Json(404, "{}".to_string()),
+            // git/trees/HEAD
             MockResponse::Json(200, tree_json(&["README.md"], 1)),
         ])
         .await;
@@ -3077,6 +3108,33 @@ mod tests {
 
         assert!(error.contains("releases turned off"), "{error}");
         assert!(!error.contains("application key"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_an_empty_repository_with_releases_turned_off_is_found() {
+        let (address, requests) = mock_forge_serving(vec![
+            // releases/latest
+            MockResponse::Json(404, "{}".to_string()),
+            // releases?limit=10
+            MockResponse::Json(404, "{}".to_string()),
+            // git/trees/HEAD: an empty repository has nothing to list.
+            MockResponse::Json(404, "{}".to_string()),
+            // The repository itself.
+            MockResponse::Json(200, "{}".to_string()),
+        ])
+        .await;
+
+        let error = ForgejoAdapter::new(ForgeCredentials::default())
+            .get_latest_release(&format!("{}/owner/repo", address), None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("releases turned off"), "{error}");
+        assert_eq!(
+            requests.lock().unwrap()[3].target,
+            "/api/v1/repos/owner/repo"
+        );
     }
 
     #[test]
