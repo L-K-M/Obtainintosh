@@ -188,6 +188,7 @@ pub fn run() {
             commands::add_app,
             commands::update_app,
             commands::remove_app,
+            commands::list_release_programs,
             commands::check_for_updates,
             commands::download_and_install,
             commands::reveal_downloaded_file,

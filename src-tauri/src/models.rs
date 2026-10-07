@@ -78,6 +78,13 @@ pub struct App {
     pub name: String,
     pub source_type: SourceType,
     pub source_url: String,
+    /// Which program of the repository's releases this entry tracks, in the
+    /// canonical form of `sources::AssetFilter` (`seance`, `*-gtk4-*`). `None`
+    /// leaves the choice to the platform picker, which suits the usual
+    /// repository with one program per release — and data files written
+    /// before filters existed, hence the default.
+    #[serde(default)]
+    pub asset_filter: Option<String>,
     /// Everything below is state Obtainintosh recomputes — an installed
     /// version it re-detects, a release it re-fetches. Defaulting them keeps a
     /// data file written by an older version loadable instead of sending it
@@ -124,6 +131,7 @@ impl std::fmt::Debug for App {
             .field("name", &self.name)
             .field("source_type", &self.source_type)
             .field("source_url", &self.source_url)
+            .field("asset_filter", &self.asset_filter)
             .field("current_version", &self.current_version)
             .field("latest_version", &self.latest_version)
             .field("install_path", &self.install_path)
@@ -158,6 +166,18 @@ pub struct Release {
     pub file_size: Option<u64>,
     pub checksum: Option<String>,
     pub release_notes: Option<String>,
+}
+
+/// The programs a release offers the platform this build runs on, for the
+/// Add Program dialog to offer when a repository publishes several.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleasePrograms {
+    pub version: String,
+    /// Sorted program names, e.g. `["planchette", "poltergeist", "seance"]`.
+    pub programs: Vec<String>,
+    /// The program an entry without a filter downloads.
+    pub default_program: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

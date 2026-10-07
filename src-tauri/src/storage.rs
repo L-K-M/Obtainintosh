@@ -286,16 +286,14 @@ impl Storage {
     }
 
     pub fn add_app(&self, app: App) -> Result<App> {
+        let duplicate = already_tracked(&app);
         let mut addition = self.add_apps(vec![app])?;
-        match addition.added.pop() {
-            Some(app) => Ok(app),
-            None => anyhow::bail!("This repository is already being tracked"),
-        }
+        addition.added.pop().ok_or(duplicate)
     }
 
     /// Adds a batch of programs in one write, skipping any whose repository
-    /// is tracked already — by an existing entry or by an earlier entry of
-    /// the same batch. Skipping rather than failing is what an import wants:
+    /// and program are tracked already — by an existing entry or by an
+    /// earlier entry of the same batch. Skipping rather than failing is what an import wants:
     /// a list that overlaps the current one should add the new programs, not
     /// stop at the first familiar one. Ids are assigned to entries that
     /// arrive without one, or whose id is taken already — every path that
@@ -308,15 +306,11 @@ impl Storage {
         // fails — the app would show a program it did not persist, and the
         // discrepancy would only surface on the next launch.
         let mut proposed = data.clone();
-        let mut tracked: HashSet<String> = proposed
-            .apps
-            .iter()
-            .map(|app| crate::sources::normalize_repo_url(&app.source_url))
-            .collect();
+        let mut tracked: HashSet<TrackingKey> = proposed.apps.iter().map(tracking_key).collect();
         let mut ids: HashSet<String> = proposed.apps.iter().map(|app| app.id.clone()).collect();
         let mut addition = BatchAddition::default();
         for mut app in apps {
-            if !tracked.insert(crate::sources::normalize_repo_url(&app.source_url)) {
+            if !tracked.insert(tracking_key(&app)) {
                 addition.duplicates.push(app);
                 continue;
             }
@@ -341,6 +335,20 @@ impl Storage {
         let Some(index) = data.apps.iter().position(|a| a.id == updated_app.id) else {
             anyhow::bail!("App not found: {}", updated_app.id);
         };
+
+        // An edit must not turn an entry into a copy of another. Only a
+        // changed identity is checked, so entries that already collide —
+        // edits were not checked before — can still be renamed.
+        let key = tracking_key(&updated_app);
+        let identity_changed = tracking_key(&data.apps[index]) != key;
+        if identity_changed
+            && data
+                .apps
+                .iter()
+                .any(|app| app.id != updated_app.id && tracking_key(app) == key)
+        {
+            return Err(already_tracked(&updated_app));
+        }
 
         let mut proposed = data.clone();
         proposed.apps[index] = updated_app;
@@ -438,12 +446,41 @@ impl Storage {
     }
 }
 
-/// Whether two records still point at the same repository, compared the way
-/// the dedupe in `add_app` does so the two cannot disagree.
+/// What makes two entries track the same thing: the repository, and the
+/// program of its releases when the entry names one. Two entries for
+/// Hauntware's `seance` and `planchette` are different; two for its `seance`
+/// are duplicates.
+type TrackingKey = (String, Option<String>);
+
+fn tracking_key(app: &App) -> TrackingKey {
+    (
+        crate::sources::normalize_repo_url(&app.source_url),
+        canonical_filter(app.asset_filter.as_deref()),
+    )
+}
+
+/// The stored filter in canonical form. Every write path stores it that way
+/// already; this covers a hand-edited data file, where `Seance` and `seance`
+/// must still be one program and an empty filter none. A filter that does
+/// not parse is compared as written; its next check reports it.
+fn canonical_filter(stored: Option<&str>) -> Option<String> {
+    let stored = stored?;
+    crate::sources::AssetFilter::canonicalize(stored).unwrap_or_else(|_| Some(stored.to_string()))
+}
+
+fn already_tracked(app: &App) -> anyhow::Error {
+    match &app.asset_filter {
+        Some(program) => {
+            anyhow::anyhow!("\"{program}\" from this repository is already being tracked")
+        }
+        None => anyhow::anyhow!("This repository is already being tracked"),
+    }
+}
+
+/// Whether two records still point at the same repository and program,
+/// compared the way the dedupe in `add_app` does so the two cannot disagree.
 fn same_source_identity(left: &App, right: &App) -> bool {
-    left.source_type == right.source_type
-        && crate::sources::normalize_repo_url(&left.source_url)
-            == crate::sources::normalize_repo_url(&right.source_url)
+    left.source_type == right.source_type && tracking_key(left) == tracking_key(right)
 }
 
 /// Whether the check-owned fields are still as the snapshot left them. If they
@@ -801,6 +838,7 @@ mod tests {
             name: id.to_string(),
             source_type: SourceType::GitHub,
             source_url: source_url.to_string(),
+            asset_filter: None,
             current_version: None,
             latest_version: None,
             install_path: None,
@@ -1198,6 +1236,7 @@ mod tests {
                 name: "Obtainintosh (mine)".to_string(),
                 source_type: SourceType::GitHub,
                 source_url: source_url.clone(),
+                asset_filter: None,
                 current_version: None,
                 latest_version: None,
                 install_path: None,
@@ -1341,5 +1380,121 @@ mod tests {
                 .as_deref(),
             Some("3.0.0")
         );
+    }
+
+    #[test]
+    fn a_result_for_another_program_of_the_repository_is_not_written_back() {
+        let (storage, _temp, snapshot) = storage_with_one_app();
+        let mut refiltered = snapshot.clone();
+        refiltered.asset_filter = Some("seance".to_string());
+        storage.update_app(refiltered).unwrap();
+
+        let applied = storage
+            .apply_check_result(&snapshot, succeeded_update("2.0.0"))
+            .unwrap();
+
+        assert_eq!(applied, PendingResultApplication::DependenciesChanged);
+        let stored = storage.get_app("existing").unwrap().unwrap();
+        assert_eq!(stored.latest_version, None);
+    }
+
+    fn hauntware_app(id: &str, program: Option<&str>) -> App {
+        let mut app = test_app(id, "https://github.com/L-K-M/Hauntware");
+        app.asset_filter = program.map(str::to_string);
+        app
+    }
+
+    fn storage_with(apps: Vec<App>) -> (Storage, TestDir) {
+        let temp_dir = TestDir::new();
+        let storage = Storage {
+            file_path: temp_dir.path().join("apps.json"),
+            data: Mutex::new(AppData {
+                apps,
+                ..AppData::default()
+            }),
+        };
+        (storage, temp_dir)
+    }
+
+    #[test]
+    fn each_program_of_a_repository_is_tracked_once() {
+        let (storage, _temp) = storage_with(Vec::new());
+
+        for program in [Some("seance"), Some("planchette"), None] {
+            storage.add_app(hauntware_app("", program)).unwrap();
+        }
+        let duplicate = storage
+            .add_app(hauntware_app("", Some("seance")))
+            .unwrap_err()
+            .to_string();
+        let unfiltered = storage
+            .add_app(hauntware_app("", None))
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(storage.get_all_apps().unwrap().len(), 3);
+        assert_eq!(
+            duplicate,
+            "\"seance\" from this repository is already being tracked"
+        );
+        assert_eq!(unfiltered, "This repository is already being tracked");
+    }
+
+    #[test]
+    fn an_edit_cannot_make_an_entry_track_what_another_one_does() {
+        let (storage, _temp) = storage_with(vec![
+            hauntware_app("seance", Some("seance")),
+            hauntware_app("planchette", Some("planchette")),
+        ]);
+
+        let mut retargeted = hauntware_app("planchette", Some("seance"));
+        let error = storage
+            .update_app(retargeted.clone())
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "\"seance\" from this repository is already being tracked"
+        );
+        let stored = storage.get_app("planchette").unwrap().unwrap();
+        assert_eq!(stored.asset_filter.as_deref(), Some("planchette"));
+
+        retargeted.asset_filter = Some("poltergeist".to_string());
+        storage.update_app(retargeted).unwrap();
+    }
+
+    #[test]
+    fn entries_that_already_collide_stay_editable() {
+        // Edits were not checked before, so a data file can hold two entries
+        // for the same repository already.
+        let (storage, _temp) = storage_with(vec![
+            test_app("first", "https://github.com/owner/same"),
+            test_app("second", "https://github.com/owner/same"),
+        ]);
+
+        let mut renamed = storage.get_app("second").unwrap().unwrap();
+        renamed.name = "Renamed".to_string();
+        storage.update_app(renamed).unwrap();
+
+        let stored = storage.get_app("second").unwrap().unwrap();
+        assert_eq!(stored.name, "Renamed");
+    }
+
+    #[test]
+    fn hand_edited_filters_are_compared_in_canonical_form() {
+        let (storage, _temp) = storage_with(vec![
+            hauntware_app("capitalised", Some("Seance")),
+            hauntware_app("blank", Some("")),
+        ]);
+
+        let duplicate = storage.add_app(hauntware_app("", Some("seance")));
+        let unfiltered = storage.add_app(hauntware_app("", None));
+
+        assert!(
+            duplicate.is_err(),
+            "\"Seance\" and \"seance\" are one program"
+        );
+        assert!(unfiltered.is_err(), "an empty filter is no filter");
     }
 }
