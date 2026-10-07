@@ -49,6 +49,11 @@ const PACKAGE_SUFFIXES: &[&str] = &[
     ".xz",
     ".bz2",
     ".zst",
+    // Font files, as in crate::font_file::FONT_EXTENSIONS.
+    ".ttf",
+    ".otf",
+    ".ttc",
+    ".otc",
 ];
 
 /// Operating system names. Every marker either platform picker recognises is
@@ -402,6 +407,24 @@ mod tests {
         for (file_name, expected) in cases {
             assert_eq!(program(file_name).as_deref(), Some(expected), "{file_name}");
         }
+    }
+
+    #[test]
+    fn each_font_file_is_a_program_whatever_its_format() {
+        for file_name in ["C64Keyboard-Regular.ttf", "C64Keyboard-Regular.OTF"] {
+            assert_eq!(
+                program(file_name).as_deref(),
+                Some("c64keyboard-regular"),
+                "{file_name}"
+            );
+        }
+        assert_eq!(
+            AssetFilter::parse(
+                "https://github.com/szabadkai/c64-keyboard-font/blob/main/fonts/C64Keyboard-Regular.ttf"
+            )
+            .unwrap(),
+            Some(AssetFilter::Program("c64keyboard-regular".to_string()))
+        );
     }
 
     #[test]

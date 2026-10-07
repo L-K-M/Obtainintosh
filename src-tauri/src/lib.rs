@@ -1,5 +1,6 @@
 mod app_list;
 mod commands;
+mod font_file;
 mod installer;
 mod models;
 mod sources;

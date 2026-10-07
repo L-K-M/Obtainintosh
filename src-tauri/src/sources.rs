@@ -1,12 +1,15 @@
+use crate::font_file;
 use crate::models::{Release, ReleasePrograms, SourceType};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
 mod asset_filter;
+mod repository_fonts;
 
 use asset_filter::program_name;
 pub use asset_filter::AssetFilter;
+use repository_fonts::{RepositoryFonts, Tree};
 
 pub const USER_AGENT: &str = concat!("Obtainintosh/", env!("CARGO_PKG_VERSION"));
 
@@ -256,6 +259,24 @@ fn find_compatible_release<'a>(
     })
 }
 
+/// What a repository offers to download: the assets of a release or, for a
+/// repository that publishes no releases, the fonts committed to it.
+enum Published {
+    Release(ForgeRelease),
+    Fonts(RepositoryFonts),
+}
+
+/// How many entries of a repository's file listing Forgejo is asked for at
+/// a time: its largest page.
+const TREE_PAGE_SIZE: usize = 1000;
+
+/// How many pages of a Forgejo file listing are read before giving up on the
+/// rest, so a huge repository cannot cost an unbounded number of requests.
+const MAX_TREE_PAGES: usize = 10;
+
+/// Where GitHub serves repository files from, outside the rate-limited API.
+const GITHUB_RAW_ORIGIN: &str = "https://raw.githubusercontent.com/";
+
 pub struct GitHubAdapter {
     token: Option<String>,
 }
@@ -347,22 +368,32 @@ impl GitHubAdapter {
         repo_url: &str,
         filter: Option<&AssetFilter>,
     ) -> Result<Release> {
-        self.resolve_release(repo_url, filter)
-            .await?
-            .build_release(filter)
+        match self.resolve_release(repo_url, filter).await? {
+            Published::Release(release) => release.build_release(filter),
+            Published::Fonts(fonts) => fonts.release(filter, Self::get_file).await,
+        }
     }
 
     /// The programs the release an unfiltered entry would install offers
     /// this platform.
     pub async fn get_release_programs(&self, repo_url: &str) -> Result<ReleasePrograms> {
-        Ok(self.resolve_release(repo_url, None).await?.programs())
+        match self.resolve_release(repo_url, None).await? {
+            Published::Release(release) => Ok(release.programs()),
+            Published::Fonts(fonts) => fonts.programs(Self::get_file).await,
+        }
+    }
+
+    /// Requests a repository file. Downloads are not authenticated, so
+    /// neither is this.
+    fn get_file(url: &str) -> reqwest::RequestBuilder {
+        http_client().get(url)
     }
 
     async fn resolve_release(
         &self,
         repo_url: &str,
         filter: Option<&AssetFilter>,
-    ) -> Result<ForgeRelease> {
+    ) -> Result<Published> {
         let (owner, repo) = Self::parse_github_url(repo_url)?;
 
         let api_url = format!(
@@ -398,11 +429,55 @@ impl GitHubAdapter {
         // good build one release back.
         let stable_release_published = latest.is_some();
         if let Some(release) = latest.filter(|release| release.has_compatible_asset(filter)) {
-            return Ok(release);
+            return Ok(Published::Release(release));
         }
 
         let releases = self.get_recent_releases(&owner, &repo).await?;
-        select_recent_release(&releases, stable_release_published, filter).cloned()
+        if !stable_release_published && !has_published_release(&releases) {
+            if let Some(fonts) = self.get_repository_fonts(&owner, &repo).await? {
+                return Ok(Published::Fonts(fonts));
+            }
+        }
+        select_recent_release(&releases, stable_release_published, filter)
+            .cloned()
+            .map(Published::Release)
+    }
+
+    /// The font files on the repository's default branch, if it has any.
+    async fn get_repository_fonts(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<RepositoryFonts>> {
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees/HEAD?recursive=1",
+            owner, repo
+        );
+
+        let response = self
+            .get(&api_url)
+            .send()
+            .await
+            .context("Failed to fetch GitHub repository files")?;
+
+        // An empty repository has no default branch to list (409 Conflict).
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::CONFLICT
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            anyhow::bail!("GitHub API error: {}", response.status());
+        }
+
+        let tree: Tree = response
+            .json()
+            .await
+            .context("Failed to parse GitHub repository files")?;
+        RepositoryFonts::from_tree(tree.tree, |path| {
+            repository_file_url(GITHUB_RAW_ORIGIN, &[owner, repo, "HEAD"], path)
+        })
     }
 
     async fn get_recent_releases(&self, owner: &str, repo: &str) -> Result<Vec<ForgeRelease>> {
@@ -488,22 +563,31 @@ impl ForgejoAdapter {
         repo_url: &str,
         filter: Option<&AssetFilter>,
     ) -> Result<Release> {
-        self.resolve_release(repo_url, filter)
-            .await?
-            .build_release(filter)
+        match self.resolve_release(repo_url, filter).await? {
+            Published::Release(release) => release.build_release(filter),
+            Published::Fonts(fonts) => fonts.release(filter, |url| self.get_file(url)).await,
+        }
     }
 
     /// The programs the release an unfiltered entry would install offers
     /// this platform.
     pub async fn get_release_programs(&self, repo_url: &str) -> Result<ReleasePrograms> {
-        Ok(self.resolve_release(repo_url, None).await?.programs())
+        match self.resolve_release(repo_url, None).await? {
+            Published::Release(release) => Ok(release.programs()),
+            Published::Fonts(fonts) => fonts.programs(|url| self.get_file(url)).await,
+        }
+    }
+
+    /// Requests a repository file, authenticated like the download of it.
+    fn get_file(&self, url: &str) -> reqwest::RequestBuilder {
+        self.credentials.authorize(http_client().get(url), url)
     }
 
     async fn resolve_release(
         &self,
         repo_url: &str,
         filter: Option<&AssetFilter>,
-    ) -> Result<ForgeRelease> {
+    ) -> Result<Published> {
         let (base_url, owner, repo) = parse_forgejo_url(repo_url)?;
         let releases_url = format!("{}/api/v1/repos/{}/{}/releases", base_url, owner, repo);
 
@@ -533,14 +617,30 @@ impl ForgejoAdapter {
 
         let stable_release_published = latest.is_some();
         if let Some(release) = latest.filter(|release| release.has_compatible_asset(filter)) {
-            return Ok(release);
+            return Ok(Published::Release(release));
         }
 
-        let releases = self.get_recent_releases(&releases_url).await?;
-        select_recent_release(&releases, stable_release_published, filter).cloned()
+        let Some(releases) = self.get_recent_releases(&releases_url).await? else {
+            // A repository with releases turned off answers 404 here, like
+            // one the credentials cannot see. Its files tell the two apart.
+            return self
+                .get_repository_fonts(&base_url, &owner, &repo)
+                .await?
+                .map(Published::Fonts)
+                .context(FORGEJO_REPOSITORY_NOT_FOUND);
+        };
+        if !stable_release_published && !has_published_release(&releases) {
+            if let Some(fonts) = self.get_repository_fonts(&base_url, &owner, &repo).await? {
+                return Ok(Published::Fonts(fonts));
+            }
+        }
+        select_recent_release(&releases, stable_release_published, filter)
+            .cloned()
+            .map(Published::Release)
     }
 
-    async fn get_recent_releases(&self, releases_url: &str) -> Result<Vec<ForgeRelease>> {
+    /// The recent releases, or None when the release list is not found.
+    async fn get_recent_releases(&self, releases_url: &str) -> Result<Option<Vec<ForgeRelease>>> {
         let response = self
             .get(&format!("{}?limit={}", releases_url, RECENT_RELEASE_LIMIT))
             .send()
@@ -548,11 +648,7 @@ impl ForgejoAdapter {
             .context("Failed to fetch Forgejo releases")?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!(
-                "Repository not found on this Forgejo instance. A private repository \
-                 also looks like this when the username or application key is missing \
-                 or wrong."
-            );
+            return Ok(None);
         }
         if !response.status().is_success() {
             anyhow::bail!("{}", forgejo_error(response.status()));
@@ -561,7 +657,68 @@ impl ForgejoAdapter {
         response
             .json()
             .await
+            .map(Some)
             .context("Failed to parse Forgejo releases")
+    }
+
+    /// The font files on the repository's default branch, if it has any.
+    /// Forgejo pages the listing; `total_count` says when it is complete.
+    async fn get_repository_fonts(
+        &self,
+        base_url: &str,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<RepositoryFonts>> {
+        let tree_url = format!(
+            "{}/api/v1/repos/{}/{}/git/trees/HEAD?recursive=true&per_page={}",
+            base_url, owner, repo, TREE_PAGE_SIZE
+        );
+
+        let mut entries = Vec::new();
+        for page in 1..=MAX_TREE_PAGES {
+            let response = self
+                .get(&format!("{}&page={}", tree_url, page))
+                .send()
+                .await
+                .context("Failed to fetch Forgejo repository files")?;
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            if !response.status().is_success() {
+                anyhow::bail!("{}", forgejo_error(response.status()));
+            }
+
+            let tree: Tree = response
+                .json()
+                .await
+                .context("Failed to parse Forgejo repository files")?;
+            let received = tree.tree.len();
+            entries.extend(tree.tree);
+
+            let total = tree.total_count.unwrap_or_default();
+            if received == 0 || entries.len() >= total {
+                break;
+            }
+            if page == MAX_TREE_PAGES {
+                log::warn!(
+                    "Read {} of {} files of {}/{}; fonts among the rest are not offered",
+                    entries.len(),
+                    total,
+                    owner,
+                    repo
+                );
+            }
+        }
+
+        let raw_origin = format!("{}/", base_url);
+        RepositoryFonts::from_tree(entries, |path| {
+            repository_file_url(
+                &raw_origin,
+                &["api", "v1", "repos", owner, repo, "raw"],
+                path,
+            )
+        })
     }
 
     /// The credentials to reuse for the asset download that follows a release
@@ -575,6 +732,24 @@ impl ForgejoAdapter {
             origin: base_url,
         })
     }
+}
+
+/// Shown when a Forgejo repository cannot be found, which is also how a
+/// private one looks to missing or wrong credentials.
+const FORGEJO_REPOSITORY_NOT_FOUND: &str = "Repository not found on this Forgejo instance. \
+     A private repository also looks like this when the username or application key is \
+     missing or wrong.";
+
+/// The URL of a repository file: `origin`, then `prefix`, then the file's
+/// path, each segment percent-encoded (`My Font.ttf` → `My%20Font.ttf`).
+fn repository_file_url(origin: &str, prefix: &[&str], path: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(origin).context("Invalid repository URL")?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("Invalid repository URL"))?
+        .pop_if_empty()
+        .extend(prefix)
+        .extend(path.split('/'));
+    Ok(url.into())
 }
 
 /// Credentials for a self-hosted forge instance: the account name plus the
@@ -808,6 +983,9 @@ fn find_macos_asset_for_arch<'a>(
     let assets: Vec<&ReleaseAsset> = assets.into_iter().collect();
     log::debug!("Finding macOS asset from {} candidates", assets.len());
     let extensions = [".dmg", ".pkg", ".app.tar.gz", ".tar.gz", ".zip"];
+    // The first index that is a generic archive rather than a macOS-specific
+    // package format.
+    const FIRST_GENERIC_ARCHIVE_RANK: usize = 3;
     let macos_markers = ["mac", "macos", "macosx", "darwin", "osx"];
     let other_os_markers = [
         "windows", "win", "win32", "win64", "linux", "linux32", "linux64", "ubuntu", "debian",
@@ -818,7 +996,7 @@ fn find_macos_asset_for_arch<'a>(
         .into_iter()
         .filter_map(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
+            let package_rank = package_format_rank(&name, &extensions)?;
 
             if other_os_markers
                 .iter()
@@ -830,7 +1008,8 @@ fn find_macos_asset_for_arch<'a>(
             let has_macos_marker = macos_markers
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
-            let generic_archive = package_rank >= 3;
+            let generic_archive =
+                (FIRST_GENERIC_ARCHIVE_RANK..extensions.len()).contains(&package_rank);
             if generic_archive && !has_macos_marker {
                 return None;
             }
@@ -924,14 +1103,14 @@ fn find_linux_asset_for_arch<'a>(
         "freebsd", "openbsd", "netbsd", "solaris", "ios", "tvos",
     ];
     // The first index that is a generic archive rather than a Linux-specific
-    // package format, mirroring the macOS picker's `package_rank >= 3` check.
+    // package format, mirroring the macOS picker.
     const FIRST_GENERIC_ARCHIVE_RANK: usize = 2;
 
     let selected = assets
         .into_iter()
         .filter_map(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            let package_rank = extensions.iter().position(|ext| name.ends_with(ext))?;
+            let package_rank = package_format_rank(&name, &extensions)?;
 
             if other_os_markers
                 .iter()
@@ -943,7 +1122,8 @@ fn find_linux_asset_for_arch<'a>(
             let has_linux_marker = linux_markers
                 .iter()
                 .any(|marker| has_name_marker(&name, marker));
-            let generic_archive = package_rank >= FIRST_GENERIC_ARCHIVE_RANK;
+            let generic_archive =
+                (FIRST_GENERIC_ARCHIVE_RANK..extensions.len()).contains(&package_rank);
             if generic_archive && !has_linux_marker {
                 return None;
             }
@@ -996,6 +1176,17 @@ fn find_linux_asset_for_arch<'a>(
             None
         }
     }
+}
+
+/// Where a lowercased asset name ranks among a picker's package formats, or
+/// None when it is no format the picker takes. Font files rank after every
+/// package, so a release that ships a program besides its font is tracked for
+/// the program. Fonts suit every system, so they need no platform marker.
+fn package_format_rank(name: &str, extensions: &[&str]) -> Option<usize> {
+    extensions
+        .iter()
+        .chain(&font_file::FONT_EXTENSIONS)
+        .position(|extension| name.ends_with(extension))
 }
 
 fn has_name_marker(name: &str, marker: &str) -> bool {
@@ -1520,6 +1711,37 @@ mod tests {
     struct RecordedRequest {
         target: String,
         authorization: Option<String>,
+        range: Option<String>,
+    }
+
+    enum MockResponse {
+        /// A status and a JSON body.
+        Json(u16, String),
+        /// A file, served like a forge serves one: a `Range` request gets
+        /// 206 Partial Content and just those bytes.
+        File(Vec<u8>),
+    }
+
+    fn header_value(lines: &[&str], name: &str) -> Option<String> {
+        lines
+            .iter()
+            .find(|line| {
+                line.split_once(':')
+                    .is_some_and(|(header, _)| header.eq_ignore_ascii_case(name))
+            })
+            .and_then(|line| line.split_once(':'))
+            .map(|(_, value)| value.trim().to_string())
+    }
+
+    /// The bytes a `bytes=<first>-<last>` range selects, clipped to the file.
+    fn ranged(file: &[u8], range: &str) -> Vec<u8> {
+        let (first, last) = range
+            .strip_prefix("bytes=")
+            .and_then(|range| range.split_once('-'))
+            .unwrap();
+        let first: usize = first.parse().unwrap();
+        let end = (last.parse::<usize>().unwrap() + 1).min(file.len());
+        file[first.min(end)..end].to_vec()
     }
 
     /// A stand-in for a Forgejo instance: answers with canned responses in
@@ -1527,6 +1749,21 @@ mod tests {
     /// fallback and authentication can be exercised without a network.
     async fn mock_forge(
         responses: Vec<(u16, String)>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<RecordedRequest>>>,
+    ) {
+        mock_forge_serving(
+            responses
+                .into_iter()
+                .map(|(status, body)| MockResponse::Json(status, body))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn mock_forge_serving(
+        responses: Vec<MockResponse>,
     ) -> (
         String,
         std::sync::Arc<std::sync::Mutex<Vec<RecordedRequest>>>,
@@ -1539,7 +1776,7 @@ mod tests {
         let recorder = std::sync::Arc::clone(&requests);
 
         tokio::spawn(async move {
-            for (status, body) in responses {
+            for response in responses {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
@@ -1557,37 +1794,47 @@ mod tests {
                 }
 
                 let text = String::from_utf8_lossy(&buffer).to_string();
-                let mut lines = text.lines();
+                let lines: Vec<&str> = text.lines().collect();
                 let target = lines
-                    .next()
+                    .first()
                     .and_then(|line| line.split(' ').nth(1))
                     .unwrap_or_default()
                     .to_string();
-                let authorization = lines
-                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-                    .and_then(|line| line.split_once(':'))
-                    .map(|(_, value)| value.trim().to_string());
+                let authorization = header_value(&lines, "authorization");
+                let range = header_value(&lines, "range");
                 recorder.lock().unwrap().push(RecordedRequest {
                     target,
                     authorization,
+                    range: range.clone(),
                 });
 
+                let (status, content_type, body) = match response {
+                    MockResponse::Json(status, body) => {
+                        (status, "application/json", body.into_bytes())
+                    }
+                    MockResponse::File(file) => match range {
+                        Some(range) => (206, "application/octet-stream", ranged(&file, &range)),
+                        None => (200, "application/octet-stream", file),
+                    },
+                };
                 let reason = match status {
                     200 => "OK",
+                    206 => "Partial Content",
                     401 => "Unauthorized",
                     404 => "Not Found",
                     _ => "Error",
                 };
                 // Closing each connection keeps the accept loop above in step
                 // with the requests instead of racing keep-alive reuse.
-                let response = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                let head = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     status,
                     reason,
-                    body.len(),
-                    body
+                    content_type,
+                    body.len()
                 );
-                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
                 let _ = stream.flush().await;
             }
         });
@@ -1688,7 +1935,8 @@ mod tests {
     async fn test_forgejo_missing_repository_points_at_the_credentials() {
         // A private repository the credentials cannot see 404s just like a
         // repository that does not exist, so the message has to cover both.
-        let (address, _) = mock_forge(vec![(404, "{}".to_string()), (404, "{}".to_string())]).await;
+        // The release list and the file listing both 404.
+        let (address, _) = mock_forge(vec![(404, "{}".to_string()); 3]).await;
 
         let adapter = ForgejoAdapter::new(ForgeCredentials::default());
         let error = adapter
@@ -1936,6 +2184,28 @@ mod tests {
         ];
         let selected = find_linux_asset_for_arch(&without_deb, CpuArch::X86_64).unwrap();
         assert_eq!(selected.name, "tool-x86_64.AppImage");
+    }
+
+    #[test]
+    fn fonts_need_no_platform_marker_and_rank_after_programs() {
+        let fonts_only = vec![asset("Inter-Regular.otf"), asset("Inter-Regular.ttf")];
+        let with_program = vec![
+            asset("Inter-Regular.ttf"),
+            asset("tool.dmg"),
+            asset("tool.AppImage"),
+        ];
+
+        for target_arch in [CpuArch::Arm64, CpuArch::X86_64] {
+            let mac_font = find_macos_asset_for_arch(&fonts_only, target_arch).unwrap();
+            let linux_font = find_linux_asset_for_arch(&fonts_only, target_arch).unwrap();
+            assert_eq!(mac_font.name, "Inter-Regular.ttf");
+            assert_eq!(linux_font.name, "Inter-Regular.ttf");
+
+            let mac = find_macos_asset_for_arch(&with_program, target_arch).unwrap();
+            let linux = find_linux_asset_for_arch(&with_program, target_arch).unwrap();
+            assert_eq!(mac.name, "tool.dmg");
+            assert_eq!(linux.name, "tool.AppImage");
+        }
     }
 
     #[test]
@@ -2563,6 +2833,112 @@ mod tests {
         assert!(
             error.ends_with(&format!("The newest offers nothing for {PLATFORM_LABEL}")),
             "{error}"
+        );
+    }
+
+    fn tree_json(paths: &[&str], total_count: usize) -> String {
+        let entries: Vec<serde_json::Value> = paths
+            .iter()
+            .map(|path| serde_json::json!({ "path": path, "type": "blob", "size": 4096 }))
+            .collect();
+        serde_json::json!({ "tree": entries, "total_count": total_count, "truncated": true })
+            .to_string()
+    }
+
+    fn version_font(version: &str) -> Vec<u8> {
+        crate::font_file::tests::font_bytes(&[(3, &format!("Version {version}"))])
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_reads_a_committed_font_when_there_are_no_releases() {
+        let (address, requests) = mock_forge_serving(vec![
+            MockResponse::Json(404, "{}".to_string()),
+            MockResponse::Json(200, "[]".to_string()),
+            MockResponse::Json(
+                200,
+                tree_json(&["README.md", "fonts/My Font-Regular.ttf"], 2),
+            ),
+            MockResponse::File(version_font("1.107")),
+            MockResponse::File(version_font("1.107")),
+        ])
+        .await;
+
+        let adapter = ForgejoAdapter::new(ForgeCredentials::new(
+            Some("alice".to_string()),
+            Some("key123".to_string()),
+        ));
+        let release = adapter
+            .get_latest_release(&format!("{}/owner/repo", address), None)
+            .await
+            .unwrap();
+
+        assert_eq!(release.version, "1.107");
+        assert_eq!(release.file_name, "My Font-Regular.ttf");
+        assert_eq!(release.file_size, Some(4096));
+        assert_eq!(
+            release.download_url,
+            format!("{address}/api/v1/repos/owner/repo/raw/fonts/My%20Font-Regular.ttf")
+        );
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests[2].target,
+            "/api/v1/repos/owner/repo/git/trees/HEAD?recursive=true&per_page=1000&page=1"
+        );
+        // The version comes from two small reads, not a download, and they
+        // authenticate like the download will.
+        assert_eq!(requests[3].range.as_deref(), Some("bytes=0-4095"));
+        assert!(requests[4].range.is_some());
+        assert_eq!(requests.len(), 5);
+        assert!(requests[3..]
+            .iter()
+            .all(|request| request.authorization.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_forgejo_reads_the_files_of_a_repository_with_releases_turned_off() {
+        // Turned-off releases 404 like a missing repository; the listing of
+        // its files, paged here, tells them apart.
+        let (address, requests) = mock_forge_serving(vec![
+            MockResponse::Json(404, "{}".to_string()),
+            MockResponse::Json(404, "{}".to_string()),
+            MockResponse::Json(200, tree_json(&["Abacus-Regular.otf", "OFL.txt"], 3)),
+            MockResponse::Json(200, tree_json(&["Abacus-Bold.otf"], 3)),
+            MockResponse::File(version_font("2.0")),
+            MockResponse::File(version_font("2.0")),
+        ])
+        .await;
+
+        let programs = ForgejoAdapter::new(ForgeCredentials::default())
+            .get_release_programs(&format!("{}/owner/repo", address))
+            .await
+            .unwrap();
+
+        assert_eq!(programs.version, "2.0");
+        assert_eq!(programs.programs, ["abacus-bold", "abacus-regular"]);
+        assert_eq!(programs.default_program.as_deref(), Some("abacus-bold"));
+        assert!(requests.lock().unwrap()[3].target.ends_with("&page=2"));
+    }
+
+    #[test]
+    fn repository_file_urls_encode_each_segment() {
+        assert_eq!(
+            repository_file_url(
+                GITHUB_RAW_ORIGIN,
+                &["szabadkai", "c64-keyboard-font", "HEAD"],
+                "fonts/C64 Keyboard#1.ttf"
+            )
+            .unwrap(),
+            "https://raw.githubusercontent.com/szabadkai/c64-keyboard-font/HEAD/fonts/C64%20Keyboard%231.ttf"
+        );
+        assert_eq!(
+            repository_file_url(
+                "http://127.0.0.1:3000/",
+                &["api", "v1", "repos", "owner", "repo", "raw"],
+                "A.otf"
+            )
+            .unwrap(),
+            "http://127.0.0.1:3000/api/v1/repos/owner/repo/raw/A.otf"
         );
     }
 
