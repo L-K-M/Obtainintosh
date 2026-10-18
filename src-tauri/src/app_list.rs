@@ -12,6 +12,7 @@
 //! overwritten by an import.
 
 use crate::models::{App, SourceType};
+use crate::sources::AssetFilter;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -28,10 +29,17 @@ pub const FILE_TYPE_LABEL: &str = "Obtainintosh program list";
 /// tell a stray JSON file apart from one this module wrote.
 const FORMAT: &str = "obtainintosh-app-list";
 
-/// The format version this build writes, and the newest it reads. Bumped only
-/// when a change would make an older build misread the file; adding fields an
-/// older build ignores is not such a change.
-const FORMAT_VERSION: u32 = 1;
+/// The format version this build writes when an entry tracks one program of
+/// a multi-program release, and the newest it reads. Bumped only when a
+/// change would make an older build misread the file; adding fields an older
+/// build ignores is not such a change. Asset filters are: a build without
+/// them would track the wrong program for a filtered entry, and skip every
+/// further entry for the same repository as a duplicate.
+const FORMAT_VERSION: u32 = 2;
+
+/// The version written when no entry has an asset filter. Such a file means
+/// the same to builds that predate filters, so it stays readable by them.
+const FORMAT_VERSION_WITHOUT_ASSET_FILTERS: u32 = 1;
 
 /// Files bigger than this are refused before they are read. A list of
 /// thousands of programs is well under a megabyte, so anything near the cap is
@@ -50,6 +58,10 @@ pub struct ExportedApp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_type: Option<SourceType>,
     pub source_url: String,
+    /// The program of a multi-program release the entry tracks; absent for
+    /// the usual repository with one program per release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_filter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Never written — see the module docs — but accepted on import, so a
@@ -65,6 +77,7 @@ impl ExportedApp {
             name: app.name.clone(),
             source_type: Some(app.source_type),
             source_url: app.source_url.clone(),
+            asset_filter: app.asset_filter.clone(),
             username: app.username.clone(),
             access_token: None,
         }
@@ -116,9 +129,14 @@ impl Header {
 /// Serializes the tracked list into the file contents. Done before any dialog
 /// is shown, so a failure here never asks the user for a path first.
 pub fn render(apps: &[App]) -> Result<String> {
+    let format_version = if apps.iter().any(|app| app.asset_filter.is_some()) {
+        FORMAT_VERSION
+    } else {
+        FORMAT_VERSION_WITHOUT_ASSET_FILTERS
+    };
     let file = AppListFile {
         format: FORMAT.to_string(),
-        format_version: FORMAT_VERSION,
+        format_version,
         exported_at: chrono::Utc::now().to_rfc3339(),
         exported_by: crate::sources::USER_AGENT.to_string(),
         apps: apps.iter().map(ExportedApp::from_app).collect(),
@@ -233,6 +251,9 @@ fn app_from_entry(name: String, entry: ExportedApp) -> Result<App, String> {
                 bounded_excerpt(&source_url)
             )
         })?;
+    // Canonical, like the dialog stores it, so the duplicate check sees an
+    // entry for "Seance" and one for "seance" as the same program.
+    let asset_filter = AssetFilter::canonicalize(entry.asset_filter.as_deref().unwrap_or(""))?;
     let credentials =
         crate::commands::credentials_for(source_type, entry.username, entry.access_token);
 
@@ -241,6 +262,7 @@ fn app_from_entry(name: String, entry: ExportedApp) -> Result<App, String> {
         name,
         source_type,
         source_url,
+        asset_filter,
         current_version: None,
         latest_version: None,
         install_path: None,
@@ -317,6 +339,7 @@ mod tests {
             name: name.to_string(),
             source_type,
             source_url: url.to_string(),
+            asset_filter: None,
             current_version: Some("1.0".to_string()),
             latest_version: Some("1.1".to_string()),
             install_path: Some("/Applications/App.app".to_string()),
@@ -336,6 +359,7 @@ mod tests {
             name: name.to_string(),
             source_type: None,
             source_url: url.to_string(),
+            asset_filter: None,
             username: None,
             access_token: None,
         }
@@ -362,7 +386,10 @@ mod tests {
         assert!(!json.contains("access_token"), "{json}");
         let document: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(document["format"], FORMAT);
-        assert_eq!(document["format_version"], FORMAT_VERSION);
+        assert_eq!(
+            document["format_version"],
+            FORMAT_VERSION_WITHOUT_ASSET_FILTERS
+        );
         assert_eq!(document["exported_by"], crate::sources::USER_AGENT);
         let apps = document["apps"].as_array().unwrap();
         assert_eq!(apps.len(), 2);
@@ -411,6 +438,7 @@ mod tests {
                     name: "Private".to_string(),
                     source_type: Some(SourceType::Forgejo),
                     source_url: "https://git.example.internal/owner/private".to_string(),
+                    asset_filter: None,
                     username: Some("alice".to_string()),
                     access_token: None,
                 },
@@ -418,6 +446,7 @@ mod tests {
                     name: "Public".to_string(),
                     source_type: Some(SourceType::GitHub),
                     source_url: "https://github.com/owner/public".to_string(),
+                    asset_filter: None,
                     username: None,
                     access_token: None,
                 },
@@ -463,11 +492,11 @@ mod tests {
         }
 
         let newer =
-            parse(r#"{"format": "obtainintosh-app-list", "format_version": 2, "apps": []}"#)
+            parse(r#"{"format": "obtainintosh-app-list", "format_version": 3, "apps": []}"#)
                 .unwrap_err()
                 .to_string();
         assert!(newer.contains("newer version of Obtainintosh"), "{newer}");
-        assert!(newer.contains("format 2"), "{newer}");
+        assert!(newer.contains("format 3"), "{newer}");
 
         let no_apps = parse(r#"{"format": "obtainintosh-app-list", "format_version": 1}"#)
             .unwrap_err()
@@ -677,6 +706,67 @@ mod tests {
         assert_eq!(
             with_default_extension(PathBuf::from("/")),
             PathBuf::from("/")
+        );
+    }
+
+    #[test]
+    fn a_filtered_entry_round_trips_under_the_newer_format_version() {
+        let mut seance = app(
+            "Seance",
+            SourceType::GitHub,
+            "https://github.com/L-K-M/Hauntware",
+        );
+        seance.asset_filter = Some("seance".to_string());
+        let planchette = app(
+            "Planchette",
+            SourceType::GitHub,
+            "https://github.com/L-K-M/Hauntware",
+        );
+
+        let json = render(&[seance, planchette]).unwrap();
+
+        // An older build would track the wrong program for this file, so it
+        // must refuse it instead.
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["format_version"], FORMAT_VERSION);
+        let entries = parse(&json).unwrap();
+        assert_eq!(entries[0].asset_filter.as_deref(), Some("seance"));
+        assert_eq!(entries[1].asset_filter, None);
+        assert!(
+            !document["apps"][1]
+                .as_object()
+                .unwrap()
+                .contains_key("asset_filter"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn plan_import_stores_asset_filters_canonically_and_rejects_unusable_ones() {
+        let hauntware = "https://github.com/L-K-M/Hauntware";
+        let mut sync = entry("Seance Sync", hauntware);
+        sync.asset_filter = Some("  Seance Sync ".to_string());
+        let mut pasted = entry("Seance", hauntware);
+        pasted.asset_filter = Some("seance-macos-universal.zip".to_string());
+        let mut blank = entry("Hauntware", hauntware);
+        blank.asset_filter = Some("   ".to_string());
+        let mut everything = entry("Everything", hauntware);
+        everything.asset_filter = Some("*".to_string());
+
+        let plan = plan_import(vec![sync, pasted, blank, everything]);
+
+        let filters: Vec<Option<&str>> = plan
+            .apps
+            .iter()
+            .map(|app| app.asset_filter.as_deref())
+            .collect();
+        assert_eq!(filters, [Some("seance-sync"), Some("seance"), None]);
+        assert_eq!(plan.rejected.len(), 1);
+        assert_eq!(plan.rejected[0].label, "Everything");
+        assert!(
+            plan.rejected[0].reason.contains("matches every file"),
+            "{}",
+            plan.rejected[0].reason
         );
     }
 

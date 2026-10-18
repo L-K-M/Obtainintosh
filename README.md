@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
 
-Obtainintosh is a desktop app for macOS and Linux that tracks applications distributed through GitHub or Forgejo releases. It compares releases with what is installed — `.app` bundles in `/Applications` or `~/Applications` on macOS; dpkg packages and AppImages on Linux — downloads a release asset suitable for the platform it runs on, and reveals the downloaded file in the file manager.
+Obtainintosh is a desktop app for macOS and Linux that tracks applications and fonts distributed through GitHub or Forgejo releases. It compares releases with what is installed — `.app` bundles in `/Applications` or `~/Applications` on macOS; dpkg packages and AppImages on Linux; fonts in the font folders on both — downloads a release asset suitable for the platform it runs on, and reveals the downloaded file in the file manager.
 
 Obtainintosh currently supports GitHub repositories and Forgejo instances, including private instances that require a username and an application key. GitLab and arbitrary download pages are not supported.
 
@@ -14,18 +14,15 @@ Obtainintosh currently supports GitHub repositories and Forgejo instances, inclu
 
 ![Main window screenshot showing a list of programs in different states](./screenshot.png)
 
-> [!NOTE]
-> This project was developed with assistance from large language models (AI coding tools).
-
 ## Platform support
 
 The release workflow builds Obtainintosh for:
 
 - macOS on Apple Silicon (`aarch64-apple-darwin`), as a `.dmg`
 - macOS on Intel (`x86_64-apple-darwin`), as a `.dmg`
-- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb` and an `.AppImage`
+- Linux on x86_64 (`x86_64-unknown-linux-gnu`), as a `.deb`, an `.AppImage` and a `.flatpak`
 
-No minimum macOS version is currently documented. The Linux packages are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. Obtainintosh is not released for Windows.
+No minimum macOS version is currently documented. The `.deb` and `.AppImage` are built on Ubuntu 22.04, so they run on Ubuntu 22.04 and later; the `.deb` targets Debian-family distributions, and the `.AppImage` should work on any distribution with a comparable glibc. The `.flatpak` runs against the GNOME runtime on any distribution with Flatpak, independent of the build host. Obtainintosh is not released for Windows.
 
 Release builds can be produced without Apple signing credentials. The workflow enables signing and notarization only when the required secrets are configured, so this repository does not guarantee that a given release asset is signed or notarized. Check the release details and verify that downloads came from this repository before bypassing any macOS security warning. The Linux packages are not signed.
 
@@ -40,16 +37,17 @@ On macOS:
 On Ubuntu (and other Debian-family distributions):
 
 1. Open the [latest GitHub Release](https://github.com/L-K-M/Obtainintosh/releases/latest).
-2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
+2. Download the `.deb` and install it (double-click it, or run `sudo apt install ./obtainintosh_<version>_amd64.deb`), **or** install the `.flatpak` bundle (`flatpak install --user ./Obtainintosh-<version>-linux.flatpak`; the GNOME runtime is fetched from Flathub, so add that remote first if it is not configured), **or** download the `.AppImage`, mark it executable (`chmod +x`), and run it directly. Keeping AppImages in `~/Applications` lets Obtainintosh detect their versions.
 
 ## Use Obtainintosh
 
 1. Choose **Add Program** and enter a repository URL such as `https://github.com/owner/project` or `https://codeberg.org/owner/project`.
 2. Enter the application's name so Obtainintosh can detect its installed version: on macOS, the bundle name as it appears in `/Applications` or `~/Applications`; on Linux, the name of its dpkg package (case and spaces don't matter — "My App" finds `my-app`) or of an AppImage in `~/Applications` or `~/.local/bin`. An installed package takes precedence over an AppImage of the same name, and when several versions of an AppImage sit side by side, the highest version counts as the installed one.
-3. Leave **Source** on *Detect automatically* for a `github.com` repository, and choose *Forgejo* for an instance whose address does not identify the software. See [Forgejo instances](#forgejo-instances).
-4. Check for updates. Obtainintosh also checks tracked applications when it starts.
-5. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS). If the latest version's file is already in that directory, the download button is replaced by a folder button that reveals the cached file instead of downloading it again; the download button returns once a newer version is released or the file is cleared from the temporary directory.
-6. Open the downloaded file (`.dmg`, `.pkg`, `.deb`, archive, …) and complete installation manually. An `.AppImage` just needs to be marked executable and moved wherever you keep AppImages.
+3. If the repository publishes several programs in each release, choose the one to track under **Program in Release**. See [Releases with several programs](#releases-with-several-programs).
+4. Leave **Source** on *Detect automatically* for a `github.com` repository, and choose *Forgejo* for an instance whose address does not identify the software. See [Forgejo instances](#forgejo-instances).
+5. Check for updates. Obtainintosh also checks tracked applications when it starts.
+6. Download an available update. Obtainintosh saves the asset to a temporary directory and reveals it in the file manager (Finder on macOS). If the latest version's file is already in that directory, the download button is replaced by a folder button that reveals the cached file instead of downloading it again; the download button returns once a newer version is released or the file is cleared from the temporary directory.
+7. Open the downloaded file (`.dmg`, `.pkg`, `.deb`, archive, font, …) and complete installation manually. An `.AppImage` just needs to be marked executable and moved wherever you keep AppImages.
 
 Obtainintosh reads the latest published release. If a repository has no normal latest release, it can fall back to the newest non-draft release, including a prerelease.
 
@@ -72,9 +70,11 @@ The file is JSON with the extension `.obtainintosh`, for example `Obtainintosh P
 }
 ```
 
-An export records what identifies each program — the name, the source type, the repository URL, and the Forgejo username where there is one — and nothing Obtainintosh works out for itself (installed and latest versions, check times, cached downloads). **Application keys are never written to the file**, so a file produced by Export is safe to share. After importing a private Forgejo program, edit it and enter its application key.
+An export records what identifies each program — the name, the source type, the repository URL, the program in the release (`asset_filter`) where one is chosen, and the Forgejo username where there is one — and nothing Obtainintosh works out for itself (installed and latest versions, check times, cached downloads). **Application keys are never written to the file**, so a file produced by Export is safe to share. After importing a private Forgejo program, edit it and enter its application key.
 
-An import merges the file into the current list: programs whose repository is already tracked are left as they are, and nothing is ever removed. A file that is not an Obtainintosh program list, or that was written in a newer format than this version of Obtainintosh reads, is refused as a whole; nothing is imported from it. Each new program's installed version is detected on import, and a quiet update check runs afterwards. Entries can be written by hand, too: `name` and `source_url` are required; `source_type` (`github` or `forgejo`) may be left out for a URL Obtainintosh recognises on its own — `github.com`, `codeberg.org`, or a host that names Forgejo or Gitea, exactly as in the Add Program dialog — and must be given for any other host. A Forgejo entry may also carry an `access_token` — the same application key the Add Program dialog asks for — which is honoured on import; a hand-written file that contains one is **not** safe to share, so remove the key before passing the file on. An entry that cannot be added is named in a notification; the rest of the file is still imported.
+A file that contains an `asset_filter` is written as format version 2, which earlier versions of Obtainintosh refuse instead of tracking the wrong program; other files stay at version 1.
+
+An import merges the file into the current list: programs whose repository (and program in the release) is already tracked are left as they are, and nothing is ever removed. A file that is not an Obtainintosh program list, or that was written in a newer format than this version of Obtainintosh reads, is refused as a whole; nothing is imported from it. Each new program's installed version is detected on import, and a quiet update check runs afterwards. Entries can be written by hand, too: `name` and `source_url` are required; `source_type` (`github` or `forgejo`) may be left out for a URL Obtainintosh recognises on its own — `github.com`, `codeberg.org`, or a host that names Forgejo or Gitea, exactly as in the Add Program dialog — and must be given for any other host. An entry may carry an `asset_filter` to track one program of a multi-program release, written as in the dialog's **Program in Release** field (see [Releases with several programs](#releases-with-several-programs)). A Forgejo entry may also carry an `access_token` — the same application key the Add Program dialog asks for — which is honoured on import; a hand-written file that contains one is **not** safe to share, so remove the key before passing the file on. An entry that cannot be added is named in a notification; the rest of the file is still imported.
 
 ## Forgejo instances
 
@@ -107,6 +107,7 @@ On macOS, it looks for these formats in priority order:
 3. `.app.tar.gz`
 4. `.tar.gz`
 5. `.zip`
+6. Font files (see [Fonts](#fonts))
 
 For generic archives such as `.tar.gz` and `.zip`, the filename must identify macOS or a supported architecture with a term such as `mac`, `macos`, `darwin`, `osx`, `universal`, `arm64`, `aarch64`, or `x86_64`. Universal assets are preferred, followed by assets matching the Mac's native architecture.
 
@@ -116,8 +117,25 @@ On Linux, the priority order is:
 2. `.AppImage`
 3. `.tar.gz`
 4. `.zip`
+5. Font files (see [Fonts](#fonts))
 
 For generic archives, the filename must identify Linux with a term such as `linux`, `ubuntu`, or `debian`. Assets naming the machine's architecture (`amd64`, `x86_64`, `arm64`, `aarch64`) are preferred over unmarked ones, and assets naming a different architecture are skipped — there is no Rosetta on Linux. `.rpm` assets are not used.
+
+### Releases with several programs
+
+Some repositories publish several programs in each release, such as [Hauntware](https://github.com/L-K-M/Hauntware) with `planchette-macos-universal.zip`, `seance-macos-universal.zip`, and `seance_1.9.0-1_amd64.deb`. Unless told otherwise, Obtainintosh downloads the program whose file comes first alphabetically. To track another one, set **Program in Release** when adding or editing the program. Once the repository URL is entered, the dialog lists the programs the latest release offers your platform; choosing one also names the program after it.
+
+A program is identified by how its file names begin, up to the first part that describes a version, platform, or architecture. `seance` matches `seance-macos-universal.zip` and `seance_1.9.0-1_amd64.deb`, but not `seance-sync-linux-x64.tar.gz`, which belongs to `seance-sync`. Case does not matter, and a pasted file name or download link counts as the program it belongs to. For a naming scheme this cannot tell apart, enter a pattern over the whole file name instead, where `*` stands for any text and `?` for one character, for example `*-gtk4-*`. The platform rules above still apply among the chosen program's files.
+
+Each program of a repository can be tracked once. Name each entry after its program, so that its installed version can be detected. If the latest release lacks the chosen program, Obtainintosh uses the newest of the 10 most recent releases that has it.
+
+### Fonts
+
+Font files (`.ttf`, `.otf`, `.ttc`, `.otc`) suit every platform, so their names need no platform term. They rank after every other format, so a release that offers a program and its font is tracked for the program. Where a font comes in several formats, the `.ttf` is downloaded. A released font's version is the one the font declares, so it compares with the installed copy whatever the release's tag says.
+
+A repository that publishes no releases, such as [C64 Keyboard](https://github.com/szabadkai/c64-keyboard-font), is tracked by the font files on its default branch instead, and so is a Forgejo repository with releases turned off. The latest version is the one the font declares (`Version 1.107`, or its revision when that has no number), read without downloading the font. A repository with several fonts offers them under **Program in Release**, like a release with several programs.
+
+The installed version is read from the font with the same file name, in any of these formats, in the font folders: `~/Library/Fonts` and `/Library/Fonts` on macOS; `~/.local/share/fonts`, `~/.fonts`, `/usr/local/share/fonts`, and `/usr/share/fonts` on Linux. Font Book and GNOME Fonts keep the file name when they install a font, so the entry's name does not matter. When several copies are installed, the highest version counts.
 
 ## GitHub token and rate limits
 
@@ -151,13 +169,15 @@ npm ci
 npm run tauri dev
 ```
 
-To create local bundles (a `.dmg` on macOS; a `.deb` and an `.AppImage` on Linux):
+To create local bundles (a `.dmg` on macOS; a `.deb`, an `.AppImage` and a `.flatpak` on Linux):
 
 ```bash
-npm run tauri build
+scripts/build.sh            # everything this machine can build
+scripts/build.sh --install  # macOS only: build Obtainintosh.app into /Applications
+scripts/build.sh --run      # …or launch it
 ```
 
-Bundles for the host architecture are written below `src-tauri/target/release/bundle/`. The release workflow cross-builds the separate Apple Silicon and Intel targets and builds the Linux packages on Ubuntu 22.04.
+Bundles for the host architecture are written below `src-tauri/target/release/bundle/` (the `.flatpak` lands in `dist/`). The release workflow cross-builds the separate Apple Silicon and Intel targets and builds the Linux packages on Ubuntu 22.04.
 
 ## Troubleshooting
 
@@ -170,6 +190,7 @@ The repository has no published releases that Obtainintosh can see. Draft releas
 - Confirm that the repository has a published release with an asset in one of the formats listed under [Supported release assets](#supported-release-assets) for your platform.
 - For `.tar.gz` and `.zip` files, confirm that the filename clearly identifies the platform or the architecture using one of the terms listed above.
 - Confirm that the release provides an asset matching your machine's architecture (or, on macOS, a universal one).
+- For a program chosen under **Program in Release**, the message names it and lists the programs the newest release offers your platform. Edit the program and choose one of those.
 - If the project's naming does not match Obtainintosh's rules, download the correct asset directly from its release page.
 
 ### GitHub API rate limit or `403` error
@@ -184,8 +205,12 @@ The repository has no published releases that Obtainintosh can see. Draft releas
 
 ### `Repository not found on this Forgejo instance`
 
-- Confirm the URL is `<instance>/<owner>/<repository>`, and that the repository has at least one published release.
+- Confirm the URL is `<instance>/<owner>/<repository>`.
 - For a private repository, confirm the username and application key are filled in and that the key has read access to it. Forgejo answers the same way for a repository that does not exist and for one the credentials cannot see.
+
+### `This repository has its releases turned off and no font files to track`
+
+The repository is visible, but its releases are turned off in its settings, so it publishes nothing to download. Obtainintosh tracks such a repository by the font files on its default branch (see [Fonts](#fonts)), and this one has none.
 
 ### `Forgejo rejected the credentials`
 

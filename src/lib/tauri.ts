@@ -4,6 +4,7 @@ import type {
     CheckOutcome,
     ExportSummary,
     ImportSummary,
+    ReleasePrograms,
     Settings,
     SourceInput,
     SystemColors
@@ -15,11 +16,16 @@ export class TauriService {
     }
 
     static async addApp(input: SourceInput): Promise<App> {
-        return await invoke('add_app', { ...input });
+        return await invoke('add_app', { input });
     }
 
     static async updateApp(id: string, input: SourceInput): Promise<App> {
-        return await invoke('update_app', { id, ...input });
+        return await invoke('update_app', { id, input });
+    }
+
+    /** The programs the latest release at the dialog's URL offers this platform. */
+    static async listReleasePrograms(input: SourceInput): Promise<ReleasePrograms> {
+        return await invoke('list_release_programs', { input });
     }
 
     static async removeApp(id: string): Promise<void> {

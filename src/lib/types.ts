@@ -30,6 +30,8 @@ export interface App {
   name: string;
   source_type: SourceType;
   source_url: string;
+  /** The program of a multi-program release this entry tracks; null for all. */
+  asset_filter: string | null;
   current_version: string | null;
   latest_version: string | null;
   install_path: string | null;
@@ -51,6 +53,17 @@ export interface SourceInput {
   sourceType: SourceType | null;
   username: string | null;
   accessToken: string | null;
+  /** The program of a multi-program release, as typed; `null` for none. */
+  assetFilter: string | null;
+}
+
+/** The programs a repository's latest release offers this platform. */
+export interface ReleasePrograms {
+  version: string;
+  /** Sorted program names, e.g. `["planchette", "poltergeist", "seance"]`. */
+  programs: string[];
+  /** The program an entry without a program filter downloads. */
+  defaultProgram: string | null;
 }
 
 export interface Settings {
