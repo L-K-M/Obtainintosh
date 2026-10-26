@@ -200,6 +200,7 @@ pub fn run() {
             updates::check_self_update,
             updates::open_release_url,
             commands::get_system_colors,
+            commands::get_third_party_notices,
             window_activity::is_window_active,
         ])
         .run(tauri::generate_context!())

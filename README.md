@@ -219,4 +219,8 @@ The repository is visible, but its releases are turned off in its settings, so i
 
 ## License
 
-Obtainintosh is available under the [MIT License](./LICENSE).
+Obtainintosh's own code is released under the [MIT License](./LICENSE). The apps bundle third-party code that keeps its own licenses: Tauri and its other Rust crates, the Rust standard library, Svelte, markdown-it and other npm packages, and the Sysfont and Geneva 9.1 fonts (SIL Open Font License 1.1). The MPL-2.0 crate `option-ext` is used unmodified; the notices give the location of its source. The Linux AppImage also bundles Ubuntu 22.04 libraries, most of them under the LGPL, and the AppImage runtime, which statically links libfuse (LGPL-2.1). Their notices ship inside each package:
+
+- macOS: `Obtainintosh.app/Contents/Resources/` holds `Third-Party-Notices.txt`, `Rust-Licenses.html` and `LICENSE.txt`.
+- Linux `.deb` and AppImage: `/usr/share/doc/obtainintosh/` holds the Debian `copyright` file, `Third-Party-Notices.txt` and `Rust-Licenses.html`; the AppImage adds `SOURCES.txt`, which names the exact source package of each bundled library. The Flatpak has the same files in `/app/share/doc/obtainintosh/`.
+- In the app: the **Licenses** button in the About dialog shows `Third-Party-Notices.txt`.

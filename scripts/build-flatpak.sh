@@ -54,9 +54,10 @@ cp -a "$WORK/debroot/usr/." "$WORK/stage/"
 # flatpak exports the desktop file and icons only when they are named after
 # the app id; the bundler names them after the binary instead.
 # Shipped text files (wrappers, launchers, python) hardcode /usr; inside flatpak the prefix is /app.
+# share/doc is left out: license texts must stay verbatim, and some quote /usr/ paths.
 while IFS= read -r f; do
   sed -i '/^#!/!s|/usr/|/app/|g' "$f"
-done < <(grep -rIl '/usr/' "$WORK/stage" 2>/dev/null || true)
+done < <(find "$WORK/stage" -path "$WORK/stage/share/doc" -prune -o -type f -exec grep -Il '/usr/' {} + 2>/dev/null || true)
 while IFS= read -r f; do
   sed -i -e 's|Exec=/usr/bin/|Exec=|g' -e 's|Exec=/opt/[^/]*/bin/|Exec=|g' -e 's|Exec=/app/bin/|Exec=|g' -e '/^TryExec=/d' "$f"
 done < <(find "$WORK/stage/share/applications" -type f -name '*.desktop' 2>/dev/null)
@@ -66,13 +67,22 @@ DESKTOP="$(find "$WORK/stage/share/applications" -type f -name '*.desktop' -prin
 [ "$(basename "$DESKTOP")" = "$APP_ID.desktop" ] ||
   mv "$DESKTOP" "$WORK/stage/share/applications/$APP_ID.desktop"
 DESKTOP="$WORK/stage/share/applications/$APP_ID.desktop"
+# The AppStream metadata names the .deb's desktop file; point it at the renamed one.
+METAINFO="$WORK/stage/share/metainfo/$APP_ID.metainfo.xml"
+[ -f "$METAINFO" ] || die "no $APP_ID.metainfo.xml inside $DEB"
+sed -i "s|<launchable type=\"desktop-id\">[^<]*</launchable>|<launchable type=\"desktop-id\">$APP_ID.desktop</launchable>|" "$METAINFO"
 # The launcher resolves Icon= through flatpak's exported name.
 sed -i "s|^Icon=.*|Icon=$APP_ID|" "$DESKTOP"
 if ! find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" -name "$APP_ID.*" -print -quit 2>/dev/null | grep -q .; then
   ICON="$(find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" -name '*.png' -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -n1 | cut -f2- || true)"
   [ -n "$ICON" ] || ICON="$(find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" \( -name '*.svg' -o -name '*.png' \) -print -quit 2>/dev/null || true)"
   [ -n "$ICON" ] || die "no icon inside $DEB"
-  cp "$ICON" "$(dirname "$ICON")/$APP_ID.${ICON##*.}"
+  # Copy every size of that icon: AppStream compose (flatpak-builder runs it
+  # on the metainfo) needs one of at least 64x64 in a plain size directory,
+  # and Tauri puts its largest icon in 256x256@2.
+  while IFS= read -r size; do
+    cp "$size" "$(dirname "$size")/$APP_ID.${size##*.}"
+  done < <(find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" -name "$(basename "$ICON")" 2>/dev/null || true)
 fi
 
 flatpak remote-add --user --if-not-exists flathub "$FLATHUB_REPO"
@@ -90,6 +100,12 @@ COMMAND_NAME="$(sed -n '/^command:[[:space:]]*/{s///;p;q}' "$MANIFEST")"
 [ -n "$COMMAND_NAME" ] || die "no command: key in $MANIFEST"
 flatpak-builder --run "$WORK/build" "$MANIFEST" \
   sh -c 'bin="/app/bin/$1"; test -x "$bin" || { echo "missing $bin" >&2; ls -l /app/bin >&2; exit 1; }; bad="$(ldd "$bin" 2>/dev/null | grep "not found" || true)"; [ -z "$bad" ] || { printf "unresolved libraries:\n%s\n" "$bad" >&2; exit 1; }' _ "$COMMAND_NAME"
+
+# The license notices the .deb carries must reach the bundle's /app/share/doc.
+for notice in copyright Third-Party-Notices.txt Rust-Licenses.html; do
+  test -s "$WORK/build/files/share/doc/obtainintosh/$notice" ||
+    die "missing /app/share/doc/obtainintosh/$notice in the Flatpak"
+done
 
 VERSION="$(dpkg-deb -f "$DEB" Version)"
 BUNDLE="$ROOT/dist/Obtainintosh-$VERSION-linux.flatpak"

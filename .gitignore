@@ -17,6 +17,8 @@ vite.config.ts.timestamp-*
 # Rust / Tauri
 src-tauri/target/
 target/
+# License notices scripts/notices.sh generates for the bundles
+src-tauri/licenses/
 
 # macOS
 .DS_Store

@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Spec for scripts/deb-copyright.py: the DEP-5 copyright file that the .deb",
+    "and the AppImage install as /usr/share/doc/obtainintosh/copyright (the",
+    "Flatpak, repacked from the .deb, as /app/share/doc/obtainintosh/copyright).",
+    "scripts/notices.sh sets RUST_DOC and RUST_VERSION from the building toolchain."
+  ],
+  "package": "obtainintosh",
+  "upstream_name": "Obtainintosh",
+  "upstream_contact": "https://github.com/L-K-M/Obtainintosh/issues",
+  "source": "https://github.com/L-K-M/Obtainintosh",
+  "own": {
+    "copyright": ["2026 Lukas Mathis"],
+    "license": "MIT",
+    "license_files": ["../../LICENSE"]
+  },
+  "components": [
+    {
+      "name": "Rust crates",
+      "license": "LicenseRef-Bundled-Crates",
+      "license_text": "Each crate keeps its own license (MIT, Apache-2.0, Unicode-3.0, BSD-3-Clause, ISC, Zlib, BSL-1.0, MPL-2.0 and others). Their full license texts, copyright notices and source links, including the Source Code Form of the MPL-2.0 crates, are in Third-Party-Notices.txt, next to this file.",
+      "copyright": ["The authors of each crate, as listed in Third-Party-Notices.txt"],
+      "embedded_in": ["usr/bin/obtainintosh"]
+    },
+    {
+      "name": "Frontend npm packages and fonts",
+      "license": "LicenseRef-Bundled-Frontend",
+      "license_text": "The web frontend embedded in the binary bundles npm packages (Svelte, SvelteKit, markdown-it and others; MIT, Apache-2.0, BSD-2-Clause, ISC, Unlicense) and the Sysfont and Geneva 9.1 fonts (SIL Open Font License 1.1). Their full license texts and copyright notices are in Third-Party-Notices.txt, next to this file.",
+      "copyright": ["The authors of each package and font, as listed in Third-Party-Notices.txt"],
+      "embedded_in": ["usr/bin/obtainintosh"]
+    },
+    {
+      "name": "Rust standard library",
+      "version": "$RUST_VERSION",
+      "license": "MIT OR Apache-2.0",
+      "copyright": ["The Rust Project Developers"],
+      "source_url": "https://github.com/rust-lang/rust/tree/$RUST_VERSION/library",
+      "license_files": {
+        "MIT": ["$RUST_DOC/licenses/MIT.txt"],
+        "Apache-2.0": ["$RUST_DOC/licenses/Apache-2.0.txt"]
+      },
+      "embedded_in": ["usr/bin/obtainintosh"],
+      "comment": "The full notices, including those of std's own dependencies, are in Rust-Licenses.html next to this file."
+    }
+  ]
+}

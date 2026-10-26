@@ -628,6 +628,32 @@ pub fn get_system_colors() -> Result<SystemColors, String> {
     Ok(system_colors::get_system_colors())
 }
 
+/// The bundled third-party notices in the frontend Tauri embeds in the
+/// binary; scripts/notices.sh writes them to the frontend's root.
+const THIRD_PARTY_NOTICES: &str = "Third-Party-Notices.txt";
+/// The first line scripts/third-party-notices.mjs writes.
+const THIRD_PARTY_NOTICES_HEADER: &str = "Third-party notices for";
+
+/// The third-party notices for the About dialog. They come from the embedded
+/// frontend because the copy installed next to the app has a different path
+/// in every package format (.app, .deb, AppImage, Flatpak). Async, so reading
+/// the 2 MB text does not block the main thread.
+#[tauri::command]
+pub async fn get_third_party_notices(app: tauri::AppHandle) -> Result<String, String> {
+    const MISSING: &str = "This build does not include its third-party notices.";
+    let asset = app
+        .asset_resolver()
+        .get(THIRD_PARTY_NOTICES.to_string())
+        .ok_or(MISSING)?;
+    let text = String::from_utf8(asset.bytes)
+        .map_err(|e| format!("The third-party notices are not valid UTF-8: {e}"))?;
+    // Tauri answers a path it does not embed with index.html.
+    if !text.starts_with(THIRD_PARTY_NOTICES_HEADER) {
+        return Err(MISSING.to_string());
+    }
+    Ok(text)
+}
+
 /// What an export wrote, for the confirmation message.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
