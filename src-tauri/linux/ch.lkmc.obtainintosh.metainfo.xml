@@ -17,6 +17,11 @@
   <developer id="ch.lkmc">
     <name>Lukas Mathis</name>
   </developer>
+  <!-- Tauri writes an empty Categories= line to the desktop file, and
+       AppStream compose rejects an application without a category. -->
+  <categories>
+    <category>Utility</category>
+  </categories>
   <url type="homepage">https://github.com/L-K-M/Obtainintosh</url>
   <url type="bugtracker">https://github.com/L-K-M/Obtainintosh/issues</url>
   <launchable type="desktop-id">Obtainintosh.desktop</launchable>

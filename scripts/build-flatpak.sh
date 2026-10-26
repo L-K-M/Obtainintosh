@@ -77,7 +77,12 @@ if ! find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" -name "$APP_ID.*
   ICON="$(find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" -name '*.png' -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -n1 | cut -f2- || true)"
   [ -n "$ICON" ] || ICON="$(find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" \( -name '*.svg' -o -name '*.png' \) -print -quit 2>/dev/null || true)"
   [ -n "$ICON" ] || die "no icon inside $DEB"
-  cp "$ICON" "$(dirname "$ICON")/$APP_ID.${ICON##*.}"
+  # Copy every size of that icon: AppStream compose (flatpak-builder runs it
+  # on the metainfo) needs one of at least 64x64 in a plain size directory,
+  # and Tauri puts its largest icon in 256x256@2.
+  while IFS= read -r size; do
+    cp "$size" "$(dirname "$size")/$APP_ID.${size##*.}"
+  done < <(find "$WORK/stage/share/icons" "$WORK/stage/share/pixmaps" -name "$(basename "$ICON")" 2>/dev/null || true)
 fi
 
 flatpak remote-add --user --if-not-exists flathub "$FLATHUB_REPO"
