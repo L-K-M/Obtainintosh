@@ -40,6 +40,20 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # The build writes the npm and font notices next to the bundle and
+      # points every chunk at them; scripts/third-party-notices.mjs fails on
+      # a bundled package or font without license text.
+      - name: Check frontend license notices
+        run: |
+          notices=build/Third-Party-Notices.txt
+          test -s "$notices"
+          grep -q '^svelte ' "$notices"
+          grep -q 'Sysfont' "$notices"
+          grep -q 'Geneva 9.1' "$notices"
+          grep -q 'SIL Open Font License' "$notices"
+          test -n "$(find build/_app/immutable -name '*.js' -print -quit)"
+          if grep -rL --include='*.js' 'Third-Party-Notices.txt' build/_app/immutable | grep .; then exit 1; fi
+
   rust:
     name: Rust (fmt, clippy, test — ${{ matrix.platform }})
     # Obtainintosh ships for macOS and Linux, and each OS has code the other
@@ -87,6 +101,17 @@ jobs:
           workspaces: src-tauri
           key: ${{ matrix.platform }}
 
+      # Every crate linked into a shipped binary must publish its license
+      # text or have an override in licenses/rust-overrides.json. cargo tree
+      # resolves every target from Linux, so one leg checks all three.
+      - name: Check Rust license notices
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            python3 scripts/rust-notices.py --manifest-path src-tauri/Cargo.toml --target "$target" \
+              --overrides licenses/rust-overrides.json --own-license MIT --check
+          done
+
       # The crate lives in src-tauri/ (there is no root Cargo.toml), so every
       # cargo command must run from there.
       - name: Check formatting
@@ -100,3 +125,4 @@ jobs:
       - name: Test
         run: cargo test --locked
         working-directory: src-tauri
+

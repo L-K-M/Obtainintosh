@@ -1,0 +1,26 @@
+{
+  // Overrides for scripts/third-party-notices.mjs, which lists the npm
+  // packages and fonts the Vite build bundles. Every entry needs a reason.
+  "intro": [
+    "Obtainintosh's own code is released under the MIT License,",
+    "Copyright (c) 2026 Lukas Mathis.",
+    "The app packages ship the Rust standard library's notices as Rust-Licenses.html."
+  ],
+  "packages": {
+    // The npm package ships only LICENSE.spdx (metadata, not a license text).
+    "@tauri-apps/plugin-opener@2.5.5": {
+      "reason": "The npm package has no license text; LICENSE_MIT and LICENSE_APACHE-2.0 copied verbatim from tauri-apps/plugins-workspace at tag opener-js-v2.5.5, plugins/opener/.",
+      "files": [
+        "licenses/npm/tauri-plugin-opener-2.5.5-LICENSE_APACHE-2.0",
+        "licenses/npm/tauri-plugin-opener-2.5.5-LICENSE_MIT"
+      ]
+    },
+    // The UI kit's Unlicense covers its code; its fonts keep their own terms.
+    "@lkmc/system7-ui": {
+      "reason": "The package's LICENSE (Unlicense) covers its code only. Its two bitmap fonts are OFL-1.1 per their OpenType name tables and the package README, and the package ships no OFL text. Copyright lines from the name tables; OFL text from openfontlicense.org.",
+      "fonts": true,
+      "files": ["licenses/fonts/Sysfont-OFL.txt", "licenses/fonts/Geneva-9.1-OFL.txt"],
+      "note": "Fonts: Sysfont (Alina Sava, SIL Open Font License 1.1) and Geneva 9.1 (Kelsey Higham, SIL Open Font License 1.1)."
+    }
+  }
+}
