@@ -182,13 +182,15 @@ jobs:
 
       # Tauri v2 needs the webkit2gtk 4.1 series to compile, plus patchelf and
       # xdg-utils for the AppImage bundler (linuxdeploy's GTK plugin shells
-      # out to xdg-open); macOS runners have everything out of the box.
+      # out to xdg-open), and squashfs-tools for scripts/appimage-notices.py;
+      # macOS runners have everything out of the box.
       - name: Install Tauri system dependencies (Linux)
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils \
+            squashfs-tools
 
       - name: Set up Node
         uses: actions/setup-node@v7
@@ -253,9 +255,65 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
+      # beforeBuildCommand (scripts/notices.sh) generated the license notices
+      # and the bundle config placed them. The release stays a draft unless
+      # every leg finds them in what it uploaded.
+      - name: Check macOS bundle notices
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          bundle="src-tauri/target/${{ matrix.rust-targets }}/release/bundle"
+          check() {
+            res="$1/Obtainintosh.app/Contents/Resources"
+            for f in LICENSE.txt Third-Party-Notices.txt Rust-Licenses.html; do
+              test -s "$res/$f"
+            done
+            grep -q '^tauri ' "$res/Third-Party-Notices.txt"
+            grep -q '^svelte ' "$res/Third-Party-Notices.txt"
+            grep -q 'Geneva 9.1' "$res/Third-Party-Notices.txt"
+            grep -q 'Copyright notices for The Rust Standard Library' "$res/Rust-Licenses.html"
+          }
+          check "$bundle/macos"
+          mnt="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$bundle"/dmg/*.dmg >/dev/null
+          check "$mnt"
+          hdiutil detach "$mnt" >/dev/null
+
+      # tauri-action uploaded the AppImage as linuxdeploy left it. Add the
+      # notices and source pointers for the Ubuntu libraries and the AppImage
+      # runtime inside it, check both packages, then replace the upload.
+      - name: Add AppImage library notices and check Linux packages
+        if: startsWith(matrix.platform, 'ubuntu')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          appimage="$(realpath src-tauri/target/release/bundle/appimage/*.AppImage)"
+          python3 scripts/appimage-notices.py appimage "$appimage" \
+            --package obtainintosh --overrides licenses/linux/appimage-notices.json
+
+          doc=usr/share/doc/obtainintosh
+          tmp="$(mktemp -d)"
+          dpkg-deb -x src-tauri/target/release/bundle/deb/*.deb "$tmp/deb"
+          (cd "$tmp" && "$appimage" --appimage-extract 'usr/share/*' >/dev/null)
+          for root in "$tmp/deb" "$tmp/squashfs-root"; do
+            for f in copyright Third-Party-Notices.txt Rust-Licenses.html; do
+              test -s "$root/$doc/$f"
+            done
+            test -s "$root/usr/share/metainfo/ch.lkmc.obtainintosh.metainfo.xml"
+            grep -q '^License: MIT$' "$root/$doc/copyright"
+            grep -q '^tauri ' "$root/$doc/Third-Party-Notices.txt"
+            grep -q 'Geneva 9.1' "$root/$doc/Third-Party-Notices.txt"
+          done
+          test -s "$tmp/squashfs-root/$doc/SOURCES.txt"
+          test -s "$tmp/squashfs-root/usr/share/doc/libglib2.0-0/copyright"
+          grep -q 'Bundled system libraries' "$tmp/squashfs-root/$doc/Third-Party-Notices.txt"
+          grep -q 'type2-runtime' "$tmp/squashfs-root/$doc/Third-Party-Notices.txt"
+
+          gh release upload "$RELEASE_TAG" "$appimage" --clobber
+
   # ---------------------------------------------------------------------------
   # Linux Flatpak: repacks a freshly built .deb under the flatpak /app prefix,
-  # so the bundle ships exactly the files the .deb installs.
+  # so the bundle ships exactly the files the .deb installs, license notices
+  # included (scripts/build-flatpak.sh fails without them).
   # ---------------------------------------------------------------------------
   flatpak:
     name: Linux Flatpak
