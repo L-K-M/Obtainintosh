@@ -170,3 +170,20 @@ may waive review; report that waiver rather than claiming review passed.
 
 <!-- shared-rules:end -->
 
+## Licensing
+
+- Obtainintosh's own code is MIT (`LICENSE`). Keep the license statements in
+  `package.json`, `src-tauri/Cargo.toml`, the AppStream metainfo
+  (`src-tauri/linux/`), the Debian copyright spec
+  (`licenses/linux/copyright.json`) and the README consistent with it.
+- Before adding a dependency, vendored file or bundled asset (fonts, images,
+  icons, data), confirm its license allows redistribution in our packages.
+  Never vendor third-party code without its license file.
+- `npm run build` writes the npm and font notices
+  (`scripts/third-party-notices.mjs`); `scripts/notices.sh`, which Tauri runs
+  before every app build, adds the Rust crates (`scripts/rust-notices.py`),
+  `Rust-Licenses.html` and the Debian `copyright` file; the release adds the
+  AppImage's library notices (`scripts/appimage-notices.py`). Each generator
+  fails on a component without license text: record gaps as explicit,
+  commented overrides (`third-party-notices.jsonc`, `licenses/`), never by
+  weakening a check. Keep the CI notice checks passing.
