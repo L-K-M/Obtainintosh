@@ -1,6 +1,24 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["deb", "appimage"]
+    "targets": ["deb", "appimage"],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/doc/obtainintosh/copyright": "licenses/copyright",
+          "/usr/share/doc/obtainintosh/Third-Party-Notices.txt": "../build/Third-Party-Notices.txt",
+          "/usr/share/doc/obtainintosh/Rust-Licenses.html": "licenses/Rust-Licenses.html",
+          "/usr/share/metainfo/ch.lkmc.obtainintosh.metainfo.xml": "linux/ch.lkmc.obtainintosh.metainfo.xml"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/share/doc/obtainintosh/copyright": "licenses/copyright",
+          "/usr/share/doc/obtainintosh/Third-Party-Notices.txt": "../build/Third-Party-Notices.txt",
+          "/usr/share/doc/obtainintosh/Rust-Licenses.html": "licenses/Rust-Licenses.html",
+          "/usr/share/metainfo/ch.lkmc.obtainintosh.metainfo.xml": "linux/ch.lkmc.obtainintosh.metainfo.xml"
+        }
+      }
+    }
   }
 }
