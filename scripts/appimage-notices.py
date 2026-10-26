@@ -389,14 +389,15 @@ def source_url(template, distro, source, version):
 
 def load_overrides(path):
     if not path:
-        return {"own": [], "files": [], "packages": [], "extra": []}, Path.cwd()
+        return {"own": [], "files": [], "packages": [], "extra": [], "common_licenses": []}, Path.cwd()
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
-    unknown = set(data) - {"own", "files", "packages", "extra", "_comment"}
+    unknown = set(data) - {"own", "files", "packages", "extra", "common_licenses", "_comment"}
     if unknown:
         die(f"{path}: unknown keys {sorted(unknown)}")
-    required = {"own": ("path",), "files": ("path",), "packages": ("package",), "extra": ("name",)}
-    for kind in ("own", "files", "packages", "extra"):
+    required = {"own": ("path",), "files": ("path",), "packages": ("package",), "extra": ("name",),
+                "common_licenses": ("reference", "use")}
+    for kind in ("own", "files", "packages", "extra", "common_licenses"):
         data.setdefault(kind, [])
         for entry in data[kind]:
             if not isinstance(entry, dict):
@@ -548,13 +549,20 @@ def annotate(appdir, package, overrides, base, root, template, runtime=None, rep
                                                                record["source_version"])
         packages.append({**record, "files": files, "text": text, "url": url})
 
+    # Some copyright files cite a name base-files does not use (Ubuntu 22.04's pango:
+    # GPL-2.0 for GPL-2). A 'common_licenses' override names the text to ship under
+    # the cited name, so the reference resolves inside the AppImage.
+    aliases = {entry["reference"]: entry["use"] for entry in overrides["common_licenses"]}
     common = {}
     for pkg in packages:
         for ref in sorted(set(re.findall(r"/usr/share/common-licenses/([A-Za-z0-9][A-Za-z0-9.+_-]*)", pkg["text"]))):
             ref = ref.rstrip(".")
             path = resolve(root, f"/usr/share/common-licenses/{ref}")
+            if (not path or not os.path.isfile(in_root(root, path))) and ref in aliases:
+                path = resolve(root, f"/usr/share/common-licenses/{aliases[ref]}")
             if not path or not os.path.isfile(in_root(root, path)):
-                errors.append(f"{pkg['name']}: references /usr/share/common-licenses/{ref}, which the build host lacks")
+                errors.append(f"{pkg['name']}: references /usr/share/common-licenses/{ref}, which the build host "
+                              f"lacks; add a 'common_licenses' override naming the text it means")
                 continue
             common[ref] = read_text(in_root(root, path), f"common license {ref}")
 

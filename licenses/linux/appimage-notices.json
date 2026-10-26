@@ -28,11 +28,11 @@
       "reason": "The app's AppStream metadata (src-tauri/linux)"
     },
     {
-      "path": "usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
+      "path": "usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache",
       "reason": "Generated at build time by linuxdeploy-plugin-gtk; lists the bundled pixbuf loaders"
     },
     {
-      "path": "usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
+      "path": "usr/lib/gtk-3.0/3.0.0/immodules.cache",
       "reason": "Generated at build time by linuxdeploy-plugin-gtk; lists the bundled GTK input methods"
     },
     {
@@ -58,6 +58,18 @@
     }
   ],
   "packages": [],
+  "common_licenses": [
+    {
+      "reference": "GPL-2.0",
+      "use": "GPL-2",
+      "reason": "Ubuntu 22.04's pango copyright files (libpango-1.0-0, libpangocairo-1.0-0, libpangoft2-1.0-0, gir1.2-pango-1.0) cite /usr/share/common-licenses/GPL-2.0 for the GNU GPL version 2; base-files names that text GPL-2"
+    },
+    {
+      "reference": "GPL-3.0",
+      "use": "GPL-3",
+      "reason": "The same pango copyright files cite /usr/share/common-licenses/GPL-3.0 for the GNU GPL version 3; base-files names that text GPL-3"
+    }
+  ],
   "extra": [
     {
       "name": "AppImage type2-runtime",
