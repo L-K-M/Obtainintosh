@@ -56,6 +56,11 @@ export class TauriService {
         return await invoke('get_system_colors');
     }
 
+    /** The license notices of the third-party code bundled in the app. */
+    static async getThirdPartyNotices(): Promise<string> {
+        return await invoke('get_third_party_notices');
+    }
+
     /**
      * Opens a native save dialog and writes the program list there. The
      * dialog lives on the Rust side, so no file path passes through here;
